@@ -28,7 +28,133 @@ from app.sdk.services import ServiceConfigHelper
 from .QQmusic import QQMusicApi
 from .cloudmusic import QR_STATUS, QR_STATUS_SUCCESS, CloudMusic
 from .emby_music import EmbyMusic
+from .ncm_api import NcmApiClient, NcmApiError
 from .plex_music import PlexMusic
+
+# --------------------------------------------------------------------------
+# 配置页按钮交互脚本。
+# Vuetify JSON 模式下 `on*` 事件的值是函数代码字符串，前端 FormRender 会在
+# 表单模型上下文里执行（等价 with(model){...}），因此脚本里可直接读写
+# 表单字段（ncm_api_url、wylogin_user 等）实现「点按钮即时出结果」。
+# --------------------------------------------------------------------------
+
+JS_PROBE = """
+async function (event) {
+  probe_loading = true;
+  try {
+    const resp = await window.MoviePilotAPI.get(
+      'plugin/SyncMusicList/probe?api_url=' + encodeURIComponent(ncm_api_url || '')
+    );
+    if (resp && resp.success) {
+      probe_msg = '连接成功，ncm-api 版本：' + ((resp.data && resp.data.version) || '未知');
+    } else {
+      probe_msg = (resp && resp.message) || '连接失败，请检查地址与容器状态';
+    }
+  } catch (err) {
+    probe_msg = '连接失败：' + ((err && err.message) || err);
+  } finally {
+    probe_loading = false;
+  }
+}
+"""
+
+JS_QR_FETCH = """
+async function (event) {
+  qr_loading = true;
+  try {
+    const resp = await window.MoviePilotAPI.post(
+      'plugin/SyncMusicList/qrcode?api_url=' + encodeURIComponent(ncm_api_url || '')
+    );
+    const data = (resp && resp.data) || {};
+    if (resp && resp.success && data.qrimg) {
+      qr_img = data.qrimg;
+      qr_msg = '二维码已生成，请用网易云音乐 App 扫码，并在手机上确认登录';
+    } else {
+      qr_img = '';
+      qr_msg = (resp && resp.message) || '获取二维码失败，请先测试 ncm-api 连接';
+    }
+  } catch (err) {
+    qr_img = '';
+    qr_msg = '获取二维码失败：' + ((err && err.message) || err);
+  } finally {
+    qr_loading = false;
+  }
+}
+"""
+
+JS_QR_CHECK = """
+async function (event) {
+  qr_loading = true;
+  try {
+    const resp = await window.MoviePilotAPI.get('plugin/SyncMusicList/qrcode/status');
+    const data = (resp && resp.data) || {};
+    if (resp && resp.success) {
+      if (data.logged_in) {
+        qr_img = '';
+        qr_msg = '扫码登录成功：' + (data.nickname || '未知账号')
+          + '。Cookie 已保存，请点击右下角「保存」使配置生效';
+      } else {
+        qr_msg = data.message || data.status || '等待扫码…';
+      }
+    } else {
+      qr_msg = (resp && resp.message) || '检查扫码结果失败';
+    }
+  } catch (err) {
+    qr_msg = '检查扫码结果失败：' + ((err && err.message) || err);
+  } finally {
+    qr_loading = false;
+  }
+}
+"""
+
+JS_CAPTCHA_SEND = """
+async function (event) {
+  if (!(wylogin_user || '').trim()) {
+    login_msg = '请先填写手机号';
+    return;
+  }
+  try {
+    const resp = await window.MoviePilotAPI.post(
+      'plugin/SyncMusicList/captcha/send?phone=' + encodeURIComponent(wylogin_user || '')
+      + '&api_url=' + encodeURIComponent(ncm_api_url || '')
+    );
+    login_msg = (resp && resp.message) || '验证码发送失败';
+  } catch (err) {
+    login_msg = '验证码发送失败：' + ((err && err.message) || err);
+  }
+}
+"""
+
+JS_LOGIN_TEMPLATE = """
+async function (event) {
+  login_loading = true;
+  try {
+    const params = new URLSearchParams();
+    params.set('api_url', ncm_api_url || '');
+    params.set('login_type', '%(login_type)s');
+    params.set('user', wylogin_user || '');
+    params.set('password', wylogin_password || '');
+    params.set('cookie', wylogin_cookie || '');
+    const resp = await window.MoviePilotAPI.post(
+      'plugin/SyncMusicList/login?' + params.toString()
+    );
+    if (resp && resp.success) {
+      login_msg = resp.message || '登录成功';
+      wylogin_password = '';
+    } else {
+      login_msg = (resp && resp.message) || '登录失败';
+    }
+  } catch (err) {
+    login_msg = '登录失败：' + ((err && err.message) || err);
+  } finally {
+    login_loading = false;
+  }
+}
+"""
+
+JS_LOGIN_CAPTCHA = JS_LOGIN_TEMPLATE % {'login_type': 'captcha'}
+JS_LOGIN_PASSWORD = JS_LOGIN_TEMPLATE % {'login_type': 'password'}
+JS_LOGIN_COOKIE = JS_LOGIN_TEMPLATE % {'login_type': 'cookie'}
 
 
 class SyncMusicList(_PluginBase):
@@ -39,7 +165,7 @@ class SyncMusicList(_PluginBase):
     # 插件图标
     plugin_icon = "music.png"
     # 插件版本
-    plugin_version = "8.0.0"
+    plugin_version = "8.1.0"
     # 插件作者
     plugin_author = "逗猫"
     # 作者主页
@@ -51,12 +177,19 @@ class SyncMusicList(_PluginBase):
     # 可使用的用户级别
     auth_level = 1
 
-    #: ncm-api 默认地址，配置页可随时修改
-    DEFAULT_NCM_API_URL = "http://192.168.1.100:3000"
+    #: ncm-api 默认地址。ncm-api 默认容器端口 3000 与 MoviePilot 冲突，
+    #: 宿主机映射端口统一用 1630（如 -p 1630:3000），配置页可随时修改。
+    DEFAULT_NCM_API_URL = "http://192.168.1.100:1630"
     #: 二维码在配置页保留的有效时长（秒），过期后需要重新获取
     QRCODE_TTL = 300
     #: 插件数据中保存二维码的键名
     QRCODE_DATA_KEY = "netease_qrcode"
+    #: 配置页交互用的临时字段，不落盘（保存配置时剔除）
+    TRANSIENT_KEYS = (
+        "qr_img", "qr_msg", "qr_loading",
+        "login_msg", "login_loading",
+        "probe_msg", "probe_loading",
+    )
 
     # 私有属性
     _scheduler: Optional[BackgroundScheduler] = None
@@ -73,12 +206,17 @@ class SyncMusicList(_PluginBase):
     # ncm-api 服务地址与超时
     _ncm_api_url = DEFAULT_NCM_API_URL
     _ncm_api_timeout = 15
+    # ncm-api 防风控参数：realIP 指定国内 IP，randomCNIP 用随机中国 IP
+    _ncm_real_ip = ""
+    _ncm_random_ip = False
     # 网易云登录方式：qrcode / captcha / password / cookie
     _login_type = "qrcode"
     # 网易云登录信息（按登录方式复用：用户名 + 密码/验证码 + Cookie）
     _wylogin_user = ""
     _wylogin_password = ""
     _wylogin_cookie = ""
+    # Cookie 保活：每天检查登录状态并尝试刷新
+    _wy_keepalive = True
     # 每日推荐
     _wy_daily_list = False
     _wy_daily_song = False
@@ -120,20 +258,33 @@ class SyncMusicList(_PluginBase):
             config.get("ncm_api_url") or self.DEFAULT_NCM_API_URL
         ).strip()
         self._ncm_api_timeout = self._parse_timeout(config.get("ncm_api_timeout"))
+        # 防风控参数
+        self._ncm_real_ip = (config.get("ncm_real_ip") or "").strip()
+        self._ncm_random_ip = bool(config.get("ncm_random_ip"))
         self._login_type = config.get("login_type") or "qrcode"
         self._wylogin_user = config.get("wylogin_user") or ""
         self._wylogin_password = config.get("wylogin_password") or ""
         self._wylogin_cookie = config.get("wylogin_cookie") or ""
+        # Cookie 保活默认开启，旧配置没有该字段时视为开启
+        self._wy_keepalive = (
+            True if config.get("wy_keepalive") is None else bool(config.get("wy_keepalive"))
+        )
         self._wymusic_paths = config.get("wymusic_paths") or ""
         self._qqmusic_paths = config.get("qqmusic_paths") or ""
         self._wy_daily_list = bool(config.get("wy_daily_list"))
         self._wy_daily_song = bool(config.get("wy_daily_song"))
+
+        # 配置页交互字段（二维码图片、提示消息等）只存在于表单模型，
+        # 保存时会被前端原样带回，这里剔除后写回，避免污染持久化配置
+        self._strip_transient_config(config)
 
         # 网易云客户端（所有请求经本地 ncm-api 转发）
         self.cm = CloudMusic(
             base_url=self._ncm_api_url,
             data_path=self.get_data_path(),
             timeout=self._ncm_api_timeout,
+            real_ip=self._ncm_real_ip,
+            random_cn_ip=self._ncm_random_ip,
         )
 
         # 媒体服务器列表
@@ -180,6 +331,22 @@ class SyncMusicList(_PluginBase):
                     self._scheduler.print_jobs()
                     self._scheduler.start()
 
+    def _strip_transient_config(self, config: dict) -> None:
+        """把配置页回传的临时字段从持久化配置里清掉。"""
+        dirty = [
+            key
+            for key in self.TRANSIENT_KEYS
+            if config.get(key) not in (None, "", False)
+        ]
+        if not dirty:
+            return
+        cleaned = {key: "" for key in dirty}
+        cleaned.update({k: v for k, v in config.items() if k not in self.TRANSIENT_KEYS})
+        try:
+            self.update_config(cleaned)
+        except Exception as error:  # noqa: BLE001 - 清理失败不影响正常流程
+            logger.warning(f"清理配置页临时字段失败（已忽略）：{error}")
+
     def get_state(self) -> bool:
         """返回插件是否启用（含「立即运行一次」）。"""
         return self._enabled
@@ -225,6 +392,20 @@ class SyncMusicList(_PluginBase):
                 "summary": "查询扫码状态，成功后自动保存 Cookie",
             },
             {
+                "path": "/captcha/send",
+                "endpoint": self.api_captcha_send,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "发送网易云登录短信验证码",
+            },
+            {
+                "path": "/login",
+                "endpoint": self.api_login,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "验证码/密码/Cookie 登录",
+            },
+            {
                 "path": "/cookie",
                 "endpoint": self.api_cookie,
                 "methods": ["POST"],
@@ -244,16 +425,33 @@ class SyncMusicList(_PluginBase):
     # 插件 API
     # ------------------------------------------------------------------
 
-    def api_probe(self) -> Dict[str, Any]:
+    def _make_client(self, api_url: Optional[str]) -> CloudMusic:
+        """按指定服务地址构建临时客户端，复用 Cookie 缓存目录与防风控配置。
+
+        配置页按钮允许在保存之前就用「表单里正在编辑的地址」发起请求。
+        """
+        url = NcmApiClient.normalize_base_url(api_url) if api_url else ""
+        if not url or url == self._ncm_api_url:
+            return self.cm
+        return CloudMusic(
+            base_url=url,
+            data_path=self.get_data_path(),
+            timeout=self._ncm_api_timeout,
+            real_ip=self._ncm_real_ip,
+            random_cn_ip=self._ncm_random_ip,
+        )
+
+    def api_probe(self, api_url: Optional[str] = None) -> Dict[str, Any]:
         """探测 ncm-api 服务连通性。"""
+        cm = self._make_client(api_url)
         try:
-            version = self.cm.ping()
+            version = cm.ping()
         except Exception as error:  # noqa: BLE001 - 接口不做异常透出
             return {"success": False, "message": str(error), "data": {}}
         return {
             "success": True,
             "message": "",
-            "data": {"url": self.cm.api.base_url, "version": version},
+            "data": {"url": cm.api.base_url, "version": version},
         }
 
     def api_status(self) -> Dict[str, Any]:
@@ -268,10 +466,11 @@ class SyncMusicList(_PluginBase):
             "data": {"logged_in": bool(nickname), "nickname": nickname or ""},
         }
 
-    def api_qrcode(self) -> Dict[str, Any]:
+    def api_qrcode(self, api_url: Optional[str] = None) -> Dict[str, Any]:
         """获取扫码登录二维码并暂存 unikey。"""
+        cm = self._make_client(api_url)
         try:
-            key, image = self.cm.login_qrcode()
+            key, image = cm.login_qrcode()
         except Exception as error:  # noqa: BLE001
             return {"success": False, "message": str(error), "data": {}}
         self.save_data(
@@ -285,7 +484,7 @@ class SyncMusicList(_PluginBase):
         qrcode = self.get_data(self.QRCODE_DATA_KEY) or {}
         key = qrcode.get("unikey")
         if not key:
-            return {"success": False, "message": "没有可用的二维码，请先调用 /qrcode", "data": {}}
+            return {"success": False, "message": "没有可用的二维码，请先获取二维码", "data": {}}
         try:
             result = self.cm.check_qrcode(key)
         except Exception as error:  # noqa: BLE001
@@ -295,11 +494,71 @@ class SyncMusicList(_PluginBase):
             "message": result.get("message") or "",
             "status": QR_STATUS.get(result.get("code"), "未知状态"),
             "logged_in": False,
+            "nickname": "",
         }
         if result.get("code") == QR_STATUS_SUCCESS:
-            data["logged_in"] = self.cm.save_cookie(result.get("cookie") or "")
+            if self.cm.save_cookie(result.get("cookie") or ""):
+                data["logged_in"] = True
+                data["nickname"] = self.cm.login_status() or ""
             self.del_data(self.QRCODE_DATA_KEY)
         return {"success": True, "message": "", "data": data}
+
+    def api_captcha_send(
+        self, phone: str = "", api_url: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """发送网易云登录短信验证码。"""
+        phone = (phone or "").strip()
+        if not phone:
+            return {"success": False, "message": "请先填写手机号", "data": {}}
+        cm = self._make_client(api_url)
+        try:
+            result = cm.send_captcha(phone)
+        except Exception as error:  # noqa: BLE001
+            return {"success": False, "message": str(error), "data": {}}
+        code = result.get("code")
+        if code == 200:
+            return {"success": True, "message": "验证码已发送，请查收短信", "data": {}}
+        reason = result.get("message") or result.get("msg") or f"code={code}"
+        return {"success": False, "message": f"验证码发送失败：{reason}", "data": {}}
+
+    def api_login(
+        self,
+        api_url: Optional[str] = None,
+        login_type: Optional[str] = None,
+        user: Optional[str] = None,
+        password: Optional[str] = None,
+        cookie: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """验证码/密码/Cookie 登录，登录成功后 Cookie 直接落盘。"""
+        login_type = login_type or self._login_type or "qrcode"
+        cm = self._make_client(api_url)
+        try:
+            if login_type == "captcha":
+                ok = cm.login_by_captcha(user or "", password or "")
+            elif login_type == "password":
+                ok = cm.login_by_password(user or "", password or "")
+            elif login_type == "cookie":
+                ok = cm.login_by_cookie(cookie or "")
+            else:
+                return {
+                    "success": False,
+                    "message": f"不支持的登录方式：{login_type}，扫码请用二维码按钮",
+                    "data": {},
+                }
+        except Exception as error:  # noqa: BLE001
+            return {"success": False, "message": str(error), "data": {}}
+        if not ok:
+            return {
+                "success": False,
+                "message": "登录失败，请检查账号信息；频繁失败可能触发网易风控，请稍后再试",
+                "data": {},
+            }
+        nickname = cm.login_status() or ""
+        return {
+            "success": True,
+            "message": f"登录成功，当前账号：{nickname}" if nickname else "登录成功",
+            "data": {"nickname": nickname},
+        }
 
     def api_cookie(self, cookie: Optional[str] = None) -> Dict[str, Any]:
         """使用 Cookie 登录。"""
@@ -366,23 +625,42 @@ class SyncMusicList(_PluginBase):
             {
                 'component': 'VRow',
                 'content': [
-                    self._col(8, {
+                    self._col(6, {
                         'component': 'VTextField',
                         'props': {
                             'model': 'ncm_api_url',
                             'label': 'ncm-api 服务地址',
-                            'placeholder': 'http://192.168.1.100:3000',
+                            'placeholder': 'http://192.168.1.100:1630',
                         },
                     }),
-                    self._col(4, {
+                    self._col(3, {
                         'component': 'VTextField',
                         'props': {
                             'model': 'ncm_api_timeout',
-                            'label': 'ncm-api 超时(秒)',
+                            'label': '超时(秒)',
                             'type': 'number',
                             'placeholder': '15',
                         },
                     }),
+                    self._col(3, self._button(
+                        '测试连接', JS_PROBE, color='info', loading_model='probe_loading',
+                    )),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    self._col(6, {
+                        'component': 'VTextField',
+                        'props': {
+                            'model': 'ncm_real_ip',
+                            'label': 'realIP（可选，遇到 460 cheating 时填国内 IP）',
+                            'placeholder': '如 116.25.146.177，留空不启用',
+                        },
+                    }),
+                    self._col(6, self._switch(
+                        'ncm_random_ip', '随机中国 IP（防 460 风控，与 realIP 二选一）',
+                    )),
                 ],
             },
             {
@@ -407,110 +685,10 @@ class SyncMusicList(_PluginBase):
             },
         ]
 
-        # 二维码：有未过期的二维码时才渲染图片，避免配置页出现无效控件
-        qrcode_image = self._qrcode_image()
-        if qrcode_image:
-            content.append({
-                'component': 'VRow',
-                'content': [
-                    {
-                        'component': 'VCol',
-                        'props': {'cols': 12},
-                        'content': [
-                            {
-                                'component': 'VAlert',
-                                'props': {
-                                    'type': 'warning',
-                                    'variant': 'tonal',
-                                    'title': '扫码登录',
-                                    'text': '请用网易云音乐 App 扫描下方二维码。扫码并在手机上确认后，'
-                                            '打开「检查扫码结果」开关并保存即可完成登录。'
-                                            f'二维码 {self.QRCODE_TTL // 60} 分钟内有效。',
-                                },
-                            },
-                            {
-                                'component': 'VImg',
-                                'props': {
-                                    'src': qrcode_image,
-                                    'width': 200,
-                                    'height': 200,
-                                },
-                            },
-                        ],
-                    }
-                ],
-            })
+        # 登录区：按登录方式联动显示，操作按钮直接调插件 API 并即时回显
+        content.extend(self._login_blocks())
 
         content.extend([
-            {
-                'component': 'VRow',
-                'content': [
-                    self._col(6, {
-                        'component': 'VSelect',
-                        'props': {
-                            'model': 'login_type',
-                            'label': '网易云登录方式',
-                            'items': [
-                                {'title': '扫码登录(推荐)', 'value': 'qrcode'},
-                                {'title': '手机号+短信验证码', 'value': 'captcha'},
-                                {'title': '手机号/邮箱+密码', 'value': 'password'},
-                                {'title': '手动粘贴 Cookie', 'value': 'cookie'},
-                            ],
-                        },
-                    }),
-                    self._col(6, self._switch('wy_logout', '退出网易云登录')),
-                ],
-            },
-            {
-                'component': 'VRow',
-                'content': [
-                    self._col(4, {
-                        'component': 'VTextField',
-                        'props': {
-                            'model': 'wylogin_user',
-                            'label': '手机号/邮箱',
-                        },
-                    }),
-                    self._col(4, {
-                        'component': 'VTextField',
-                        'props': {
-                            'model': 'wylogin_password',
-                            'label': '密码/短信验证码',
-                            'type': 'password',
-                        },
-                    }),
-                    self._col(4, self._switch('captcha_sent', '发送短信验证码')),
-                ],
-            },
-            {
-                'component': 'VRow',
-                'content': [
-                    {
-                        'component': 'VCol',
-                        'props': {'cols': 12},
-                        'content': [
-                            {
-                                'component': 'VTextarea',
-                                'props': {
-                                    'model': 'wylogin_cookie',
-                                    'label': '手动 Cookie（登录方式选「手动粘贴 Cookie」时使用）',
-                                    'rows': 3,
-                                    'placeholder': '从浏览器开发者工具复制 music.163.com 的完整 Cookie，'
-                                                   '至少包含 MUSIC_U',
-                                },
-                            }
-                        ],
-                    }
-                ],
-            },
-            {
-                'component': 'VRow',
-                'content': [
-                    self._col(4, self._switch('qr_get', '① 获取/刷新二维码')),
-                    self._col(4, self._switch('qr_check', '② 检查扫码结果')),
-                    self._col(4, self._switch('wy_login', '执行登录(验证码/密码/Cookie)')),
-                ],
-            },
             {
                 'component': 'VRow',
                 'content': [
@@ -586,17 +764,24 @@ class SyncMusicList(_PluginBase):
                                     'variant': 'tonal',
                                     'title': '使用说明:',
                                     'text':
-                                        '0. 需先部署 ncm-api：docker run -d --name ncm-api -p 3000:3000 '
-                                        'moefurina/ncm-api:latest，并把地址填到上方; \n'
-                                        '1. 网易云登录：选好登录方式后按提示操作，扫码需「获取二维码」+「检查扫码结果」两步; \n'
-                                        '2. 耗时很长，建议每天一次即可，短时间重复运行会卡死; \n'
-                                        '3. 登录后支持每日推荐歌单与每日推荐歌曲的同步; \n'
-                                        '4. plex/emby服务器中存在音乐类型的库; \n'
-                                        '5. plex/emby的播放列表需要提前创建好并且里边至少有一首歌曲; \n'
-                                        '6. 如不存在会自动创建歌单, 如库中没符合的歌曲会创建失败; \n'
-                                        '7. 歌单同步只会搜索已存在歌曲进行添加,不会自动下载; \n'
-                                        '8. 歌曲匹配是模糊匹配只匹配曲名不匹配歌手，打开精准匹配后通过歌手过滤; \n'
-                                        '9. emby支持多用户设置，plex自带分享无需创建; \n',
+                                        '0. 需先部署 ncm-api（默认容器端口 3000 与 MoviePilot 冲突，'
+                                        '宿主机端口建议映射为 1630）：docker run -d --name ncm-api '
+                                        '-p 1630:3000 moefurina/ncm-api:latest，'
+                                        '地址填 http://192.168.X.X:1630; \n'
+                                        '1. 网易云登录：选择登录方式后页面只显示对应栏位，'
+                                        '扫码登录点「获取二维码」直接出码，扫码确认后点「检查扫码结果」; \n'
+                                        '2. 防风控：不要频繁调登录接口，登录状态还在就不要重复登录；'
+                                        '遇到 460 cheating 异常时可填写 realIP（国内 IP）或开启随机中国 IP; \n'
+                                        '3. 密码登录风控最严（网易网易云盾），推荐扫码或短信验证码登录; \n'
+                                        '4. 已开启 Cookie 保活时每天自动检查登录状态并尝试刷新（扫码登录的 Cookie 不支持刷新）; \n'
+                                        '5. 耗时很长，建议每天一次即可，短时间重复运行会卡死; \n'
+                                        '6. 登录后支持每日推荐歌单与每日推荐歌曲的同步; \n'
+                                        '7. plex/emby服务器中存在音乐类型的库; \n'
+                                        '8. plex/emby的播放列表需要提前创建好并且里边至少有一首歌曲; \n'
+                                        '9. 如不存在会自动创建歌单, 如库中没符合的歌曲会创建失败; \n'
+                                        '10. 歌单同步只会搜索已存在歌曲进行添加,不会自动下载; \n'
+                                        '11. 歌曲匹配是模糊匹配只匹配曲名不匹配歌手，打开精准匹配后通过歌手过滤; \n'
+                                        '12. emby支持多用户设置，plex自带分享无需创建; \n',
                                 },
                             }
                         ],
@@ -613,19 +798,26 @@ class SyncMusicList(_PluginBase):
             "exact_match": True,
             "ncm_api_url": self.DEFAULT_NCM_API_URL,
             "ncm_api_timeout": 15,
+            "ncm_real_ip": "",
+            "ncm_random_ip": False,
             "login_type": "qrcode",
             "wylogin_user": "",
             "wylogin_password": "",
             "wylogin_cookie": "",
-            "qr_get": False,
-            "qr_check": False,
-            "captcha_sent": False,
-            "wy_login": False,
-            "wy_logout": False,
+            "wy_keepalive": True,
             "wy_daily_song": False,
             "wy_daily_list": False,
             "wymusic_paths": "",
             "qqmusic_paths": "",
+            "wy_logout": False,
+            # 配置页交互临时字段（不落盘）
+            "qr_img": "",
+            "qr_msg": "",
+            "qr_loading": False,
+            "login_msg": "",
+            "login_loading": False,
+            "probe_msg": "",
+            "probe_loading": False,
         }
 
     def get_page(self) -> Optional[List[dict]]:
@@ -651,6 +843,237 @@ class SyncMusicList(_PluginBase):
                 'label': label,
             },
         }
+
+    @staticmethod
+    def _button(
+        text: str,
+        handler: str,
+        color: str = 'primary',
+        loading_model: Optional[str] = None,
+    ) -> dict:
+        """生成一个点击时执行 ``handler`` 脚本的按钮。
+
+        ``handler`` 在前端表单模型上下文里执行，可直接读写表单字段，
+        也可以通过 ``window.MoviePilotAPI`` 调用插件 API。
+        """
+        props = {
+            'color': color,
+            'variant': 'tonal',
+            'block': True,
+            'onClick': handler,
+        }
+        if loading_model:
+            props['loading'] = f'{{{{{loading_model}}}}}'
+        return {'component': 'VBtn', 'props': props, 'text': text}
+
+    def _login_blocks(self) -> List[dict]:
+        """网易云登录区：登录方式联动显示，操作按钮即时回显结果。"""
+        show = {
+            'qrcode': "{{login_type === 'qrcode'}}",
+            'captcha': "{{login_type === 'captcha'}}",
+            'password': "{{login_type === 'password'}}",
+            'cookie': "{{login_type === 'cookie'}}",
+        }
+        return [
+            # 登录方式选择 + 保活/退出开关
+            {
+                'component': 'VRow',
+                'content': [
+                    self._col(6, {
+                        'component': 'VSelect',
+                        'props': {
+                            'model': 'login_type',
+                            'label': '网易云登录方式',
+                            'items': [
+                                {'title': '扫码登录(推荐)', 'value': 'qrcode'},
+                                {'title': '手机号+短信验证码', 'value': 'captcha'},
+                                {'title': '手机号/邮箱+密码（风控最严）', 'value': 'password'},
+                                {'title': '手动粘贴 Cookie', 'value': 'cookie'},
+                            ],
+                        },
+                    }),
+                    self._col(3, self._switch('wy_keepalive', 'Cookie保活(每天)')),
+                    self._col(3, self._switch('wy_logout', '退出网易云登录')),
+                ],
+            },
+            # ---- 扫码登录 ----
+            {
+                'component': 'VRow',
+                'props': {'show': show['qrcode']},
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12},
+                        'content': [
+                            {
+                                'component': 'VAlert',
+                                'props': {
+                                    'type': 'warning',
+                                    'variant': 'tonal',
+                                    'title': '扫码登录',
+                                    'text': '点「获取二维码」直接出码，用网易云音乐 App 扫码'
+                                            '并在手机上确认后，点「检查扫码结果」完成登录。'
+                                            f'二维码 {self.QRCODE_TTL // 60} 分钟内有效。',
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                'component': 'VRow',
+                'props': {'show': show['qrcode']},
+                'content': [
+                    self._col(6, self._button(
+                        '获取二维码', JS_QR_FETCH, loading_model='qr_loading',
+                    )),
+                    self._col(6, self._button(
+                        '检查扫码结果', JS_QR_CHECK, color='success',
+                        loading_model='qr_loading',
+                    )),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'props': {'show': f"{show['qrcode']} && qr_img"},
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12},
+                        'content': [
+                            {
+                                'component': 'VImg',
+                                'props': {'src': '{{qr_img}}', 'width': 200, 'height': 200},
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                'component': 'VRow',
+                'props': {'show': "{{login_type === 'qrcode' && qr_msg}}"},
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12},
+                        'content': [
+                            {
+                                'component': 'VAlert',
+                                'props': {
+                                    'type': 'info',
+                                    'variant': 'tonal',
+                                    'text': '{{qr_msg}}',
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+            # ---- 短信验证码登录 ----
+            {
+                'component': 'VRow',
+                'props': {'show': show['captcha']},
+                'content': [
+                    self._col(4, {
+                        'component': 'VTextField',
+                        'props': {'model': 'wylogin_user', 'label': '手机号'},
+                    }),
+                    self._col(4, self._button(
+                        '发送验证码', JS_CAPTCHA_SEND, color='info',
+                    )),
+                    self._col(4, {
+                        'component': 'VTextField',
+                        'props': {'model': 'wylogin_password', 'label': '短信验证码'},
+                    }),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'props': {'show': show['captcha']},
+                'content': [
+                    self._col(4, self._button('验证码登录', JS_LOGIN_CAPTCHA)),
+                ],
+            },
+            # ---- 密码登录 ----
+            {
+                'component': 'VRow',
+                'props': {'show': show['password']},
+                'content': [
+                    self._col(6, {
+                        'component': 'VTextField',
+                        'props': {'model': 'wylogin_user', 'label': '手机号/邮箱'},
+                    }),
+                    self._col(6, {
+                        'component': 'VTextField',
+                        'props': {
+                            'model': 'wylogin_password',
+                            'label': '密码',
+                            'type': 'password',
+                        },
+                    }),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'props': {'show': show['password']},
+                'content': [
+                    self._col(4, self._button(
+                        '密码登录', JS_LOGIN_PASSWORD, color='warning',
+                    )),
+                ],
+            },
+            # ---- 手动 Cookie ----
+            {
+                'component': 'VRow',
+                'props': {'show': show['cookie']},
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12},
+                        'content': [
+                            {
+                                'component': 'VTextarea',
+                                'props': {
+                                    'model': 'wylogin_cookie',
+                                    'label': '网易云 Cookie',
+                                    'rows': 3,
+                                    'placeholder': '从浏览器开发者工具复制 music.163.com 的'
+                                                   '完整 Cookie，至少包含 MUSIC_U',
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                'component': 'VRow',
+                'props': {'show': show['cookie']},
+                'content': [
+                    self._col(4, self._button('校验并保存 Cookie', JS_LOGIN_COOKIE)),
+                ],
+            },
+            # ---- 操作结果提示（登录/连接测试共用） ----
+            {
+                'component': 'VRow',
+                'props': {'show': '{{login_msg || probe_msg}}'},
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12},
+                        'content': [
+                            {
+                                'component': 'VAlert',
+                                'props': {
+                                    'type': 'info',
+                                    'variant': 'tonal',
+                                    'text': '{{login_msg || probe_msg}}',
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+        ]
 
     # ------------------------------------------------------------------
     # 登录状态与登录动作
@@ -818,18 +1241,51 @@ class SyncMusicList(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_service(self) -> List[Dict[str, Any]]:
-        """注册插件公共服务：歌单同步定时任务。"""
-        if not self._enabled:
-            return []
-        return [
-            {
+        """注册插件公共服务：歌单同步定时任务 + Cookie 保活。"""
+        services: List[Dict[str, Any]] = []
+        if self._enabled:
+            services.append({
                 "id": "SyncMusicList",
                 "name": "歌单同步",
                 "trigger": CronTrigger.from_crontab(self._cron or "0 7 * * *"),
                 "func": self.__run_sync_paylist,
                 "kwargs": {},
-            }
-        ]
+            })
+        # Cookie 保活独立于同步开关：只要求插件启用且登录过
+        if self._wy_keepalive and self.cm and self.cm.cookie:
+            services.append({
+                "id": "SyncMusicListKeepalive",
+                "name": "网易云Cookie保活",
+                "trigger": CronTrigger.from_crontab("0 9 * * *"),
+                "func": self._keepalive_login,
+                "kwargs": {},
+            })
+        return services
+
+    def _keepalive_login(self) -> None:
+        """每天检查一次网易云登录状态，尽量续期 Cookie，失效时给出明确提示。"""
+        if not self.cm:
+            return
+        nickname = self.cm.login_status()
+        if nickname:
+            # /login/refresh 不支持二维码登录得到的 Cookie，扫码账号只做状态确认
+            if self._login_type != "qrcode":
+                self.cm.refresh_login()
+            logger.info(f"网易云 Cookie 保活完成，当前账号：{nickname}")
+            return
+        logger.warning("网易云登录态已失效，尝试自动恢复")
+        if (
+            self._login_type == "password"
+            and self._wylogin_user
+            and self._wylogin_password
+        ):
+            if self.cm.login_by_password(self._wylogin_user, self._wylogin_password):
+                logger.info(f"网易云已用保存的密码自动重新登录：{self.cm.login_status() or ''}")
+                return
+        logger.warning(
+            "网易云 Cookie 已失效且无法自动恢复，请到插件配置页重新扫码/验证码登录"
+            "（验证码登录因验证码一次性无法自动重登）"
+        )
 
     def __run_sync_paylist(self):
         """

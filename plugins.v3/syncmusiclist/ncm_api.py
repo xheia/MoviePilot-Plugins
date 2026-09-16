@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import random
+import threading
 import time
 from typing import Any, Dict, Optional
 
@@ -31,10 +33,24 @@ class NcmApiClient:
     #: 扫码登录属于未登录流程，带上已有 Cookie 会互相干扰，因此显式不携带。
     ANONYMOUS_PATHS = ("/login/qr/key", "/login/qr/create", "/login/qr/check")
 
-    def __init__(self, base_url: Optional[str] = None, timeout: int = 15) -> None:
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        timeout: int = 15,
+        real_ip: str = "",
+        random_cn_ip: bool = False,
+    ) -> None:
         self.base_url = self.normalize_base_url(base_url)
         self.timeout = timeout if isinstance(timeout, int) and timeout > 0 else 15
         self.cookie: str = ""
+        # 防风控：realIP 可指定一个国内 IP 绕过 460 cheating；
+        # randomCNIP 让 ncm-api 每次请求用随机中国 IP（v4.29.9+ 支持）。
+        self.real_ip = (real_ip or "").strip()
+        self.random_cn_ip = bool(random_cn_ip)
+        # 请求节流：ncm-api 对网易侧有 2 分钟缓存，但登录类接口仍怕高频，
+        # 相邻请求之间强制留出随机间隔，并用锁串行化。
+        self._throttle_lock = threading.Lock()
+        self._next_allow_time = 0.0
 
     @staticmethod
     def normalize_base_url(base_url: Optional[str]) -> str:
@@ -81,6 +97,18 @@ class NcmApiClient:
         # ncm-api 对 200 响应有 2 分钟缓存，加时间戳避免读到旧结果。
         # 扫码状态必须实时，这一步同时也是必须的。
         query["timestamp"] = int(time.time() * 1000)
+        # 防风控参数（文档：realIP / randomCNIP）
+        if self.real_ip:
+            query.setdefault("realIP", self.real_ip)
+        if self.random_cn_ip:
+            query.setdefault("randomCNIP", "true")
+
+        # 节流：保证相邻请求之间留出随机间隔，降低触发网易 IP 高频的风险
+        with self._throttle_lock:
+            wait = self._next_allow_time - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._next_allow_time = time.monotonic() + random.uniform(0.3, 0.8)
 
         url = f"{self.base_url}{path}"
         requester = RequestUtils(timeout=timeout or self.timeout)

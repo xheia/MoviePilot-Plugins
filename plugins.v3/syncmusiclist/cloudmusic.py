@@ -41,14 +41,23 @@ class CloudMusic:
         base_url: Optional[str] = None,
         data_path: Optional[Path] = None,
         timeout: int = 15,
+        real_ip: str = "",
+        random_cn_ip: bool = False,
     ) -> None:
         """
-        :param base_url: ncm-api 服务地址，例如 ``http://192.168.1.10:3000``
+        :param base_url: ncm-api 服务地址，例如 ``http://192.168.1.10:1630``
         :param data_path: 插件数据目录，Cookie 缓存写入这里
         :param timeout: 单次请求超时（秒）
+        :param real_ip: 传给 ncm-api 的 realIP 参数，用于绕过 460 cheating 风控
+        :param random_cn_ip: 是否让 ncm-api 使用随机中国 IP 发起请求
         """
         self.data_path = Path(data_path) if data_path else None
-        self.api = NcmApiClient(base_url, timeout=timeout)
+        self.api = NcmApiClient(
+            base_url,
+            timeout=timeout,
+            real_ip=real_ip,
+            random_cn_ip=random_cn_ip,
+        )
         self._cookie_loaded = False
 
     # ------------------------------------------------------------------
@@ -203,6 +212,27 @@ class CloudMusic:
             logger.info(f"网易云 Cookie 校验通过，当前账号：{nickname}")
             return True
         logger.error("Cookie 已保存，但 ncm-api 返回未登录状态，请检查 Cookie 是否完整或已失效")
+        return False
+
+    def refresh_login(self) -> bool:
+        """刷新登录状态，延长 Cookie 有效期。
+
+        注意：ncm-api 文档明确 ``/login/refresh`` 不支持刷新二维码登录
+        得到的 Cookie，扫码登录的账号请以检查登录状态为主。
+        """
+        try:
+            result = self.api.login_refresh()
+        except NcmApiError as error:
+            logger.warning(f"刷新网易云登录状态失败（已忽略）：{error}")
+            return False
+        code = result.get("code")
+        cookie = result.get("cookie") or (result.get("data") or {}).get("cookie") or ""
+        if code == 200 and cookie:
+            self.save_cookie(cookie)
+            logger.info("网易云登录状态已刷新，Cookie 已更新")
+            return True
+        reason = result.get("message") or result.get("msg") or f"code={code}"
+        logger.info(f"网易云暂不支持刷新当前 Cookie（{reason}），将以状态检查为准")
         return False
 
     def logout(self) -> None:
