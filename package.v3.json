@@ -1,0 +1,81 @@
+{
+  "SyncMusicList": {
+    "name": "歌单同步工具",
+    "description": "同步QQ&网易云歌单到plex&emby，网易云走本地部署的 ncm-api。",
+    "labels": "音乐,媒体库",
+    "version": "8.1.1",
+    "icon": "music.png",
+    "color": "#7eabf3",
+    "author": "逗猫",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "upstream": {
+      "repo": "https://github.com/baozaodetudou/MoviePilot-Plugins",
+      "author": "逗猫",
+      "base_version": "v7.2 (V2) -> 本地 V2 7.2 -> 本地 V3 8.0.0",
+      "synced_at": "2026-09",
+      "note": "V3 版本由本地 V2 实现适配而来；原始上游为 baozaodetudou/MoviePilot-Plugins（逗猫），详见 plugins.v3/syncmusiclist/README.md"
+    },
+    "history": {
+      "v8.1.1": "修复配置页空白：show 条件表达式不能拼接 {{}} 片段（前端渲染抛异常），改为整体单表达式",
+      "v8.1.0": "1. 登录方式联动显示：选哪种方式只显示对应栏位，点「获取二维码」直接出码，各登录按钮即时生效 2. ncm-api 默认端口改为 1630（避开 MoviePilot 默认端口冲突） 3. 防风控：支持 realIP/随机中国 IP、请求节流、时间戳防缓存 4. 新增 Cookie 保活（每天检查并尝试刷新，密码方式失效自动重登）",
+      "v8.0.0": "适配V3。网易云登录与取数改用本地部署的 moefurina/ncm-api，支持扫码/验证码/密码/Cookie 四种登录；移除内置 NeteaseCloudMusicApi.js 与 py_mini_racer 依赖；Plex 检索改用媒体库级 searchTracks()",
+      "v7.2": "适配v2版本",
+      "v7.1": "1. UI优化 2. 歌单去重 3. plex默认获取最高码率的歌",
+      "v7.0": "1. cookie缓存 2. 支持网抑云获取每日推荐",
+      "v6.7": "1. 优化plex搜索 2. 修复插件安装错误",
+      "v5.7": "1. 重写网易云歌单获取; 2. 优化标题后处理; 3. 优化歌手精准匹配 4. 支持多歌手单个匹配入库 5. 修复bug",
+      "v4.7": "增加精准匹配功能",
+      "v3.7": "emby支持多用户, 修复bug",
+      "v2.7": "修复bug,添加日志说明",
+      "v1.7": "支持emby",
+      "v0.7": "初始化版本音乐插件"
+    }
+  },
+  "AutomaticSubscriptionAssistant": {
+    "name": "自动订阅助手",
+    "description": "统一聚合豆瓣榜单/猫眼榜单/热门媒体/Mikan季度新番/奈飞Top10 等来源，可组合过滤后自动订阅。",
+    "labels": "订阅",
+    "version": "1.0.0",
+    "icon": "Auto_Subscribe_Assistant.png",
+    "color": "#405df5",
+    "author": "Aqr-K",
+    "release": true,
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "upstream": {
+      "repo": "https://github.com/Aqr-K/MoviePilot-Plugins",
+      "author": "Aqr-K",
+      "base_version": "v0.2.13 (V2 实现)",
+      "synced_at": "2026-09",
+      "note": "V3 专用实现（v1.0.0）基于上游 v0.2.13 适配，详见 plugins.v3/automaticsubscriptionassistant/README.md"
+    },
+    "history": {
+      "v1.0.0": "适配V3（V3专用实现，位于 plugins.v3/）。宿主能力改从稳定 SDK 取得（app.sdk.config/events/logging/plugin/media/network/utilities/browser）；媒体主身份统一为 media_source/media_id 成对字段：识别入口不再传 tmdbid/doubanid/bangumiid，订阅入口按统一身份对落地，插件历史记录与奈飞来源缓存只保存该字段对；存量 V2 历史（存 tmdbid/doubanid/bangumiid）在载入时做一次幂等迁移并重算记录身份键；订阅列表接口与去重索引改为回传统一身份字段；猫眼 Cookie 采集改用 app.sdk.browser.launch_browser_context；热门媒体统计优先读服务端新身份字段，服务端仍回旧字段时按 tmdb>douban>bangumi 优先级回推。要求 MoviePilot >=3.0.0。",
+      "v0.2.13": "修复 v0.2.12 回归：executor.py 新增的订阅流程 DEBUG 日志漏导入 logger，导致识别成功的条目统一抛 NameError 被兜底记为 error（订阅失败）；补 from app.log import logger 后恢复正常订阅。",
+      "v0.2.12": "修复定时任务 run_provider 缺 provider_id 报错（issue #7）；新增订阅流程 DEBUG 日志。",
+      "v0.2.11": "修复 Mikan 季度新番『使用代理访问』开关不生效（issue #6）：代理配置挂在 provider 实例上，实际发请求的 MikanApi 从未收到，改为构造时显式注入，季度列表与详情请求现在都能正确走代理。",
+      "v0.2.10": "补全『热门媒体』来源配置 UI 的国际化：字段标签、风格选项、评分/订阅人次提示与公告在繁體中文/English 下不再回退简体。",
+      "v0.2.9": "来源『状态检测』下沉后端兜底：新增 has_listening 判定，保存时自动关闭『已启用但无任何可监听内容』的来源，前端即时校验 + 后端保存双保险。",
+      "v0.2.8": "修复热门媒体恒取不到数据：服务端 stype 参数需传中文『电影』/『电视剧』，插件改为请求时将 movie/tv 映射为中文。",
+      "v0.2.7": "修复热门订阅本插件取不到数据：改按无过滤基线请求以命中主程序共享缓存，min_rating 改为本地过滤；空结果日志区分『无数据/超时/HTTP 异常』。",
+      "v0.2.6": "新增保存时『状态检测』，自动关闭无榜单监听的来源；热门媒体新增『订阅数据共享』开关，可一键开启并持久化全局 SUBSCRIBE_STATISTIC_SHARE。",
+      "v0.2.5": "修复奈飞榜单恒取不到数据：TSV 响应未声明 charset 被误按 ISO-8859-1 解码，改为强制按 UTF-8 解码并规避换行符撕裂数据行。",
+      "v0.2.4": "热门媒体『获取 0 条统计』日志升级为明确 warning 并给出网络可达性/代理排查指引；移除历史兼容代码。",
+      "v0.2.3": "修复连通性测试对未细配来源（奈飞/热门媒体）误报；奈飞测试强制忽略缓存；热门媒体新增『订阅数据共享』门控检测。",
+      "v0.2.2": "全部来源新增『连通性测试』（仅验证可达、不订阅不写历史，三层防抖）；组合新增启用开关；统一头部面包屑及移动端分页/侧栏布局优化。",
+      "v0.2.1": "卡片操作收进『更多』下拉菜单；组合选择器改为弹窗式卡片管理；移动端分页与概览抽屉、桌面配置页多项布局优化。",
+      "v0.2.0": "订阅历史筛选/搜索改为弹窗式（新增年份区间、多选）；异常记录新增『重新识别』；移动端概览改抽屉、保存改底部弹出条。",
+      "v0.1.9": "移动端单列并可选每页行数；骨架屏等高消除切换闪烁；默认始终进入订阅历史。",
+      "v0.1.8": "统一头部为面包屑风格；历史/管理/配置合并为顶部三标签切换；多选支持『选本页/选全部』。",
+      "v0.1.7": "历史/订阅增加名称搜索；统一分页至页脚、静默翻页；移动端『订阅配置』入口移至标签栏。",
+      "v0.1.6": "新增订阅手动管理（退订/暂停/恢复）、批量多选 + 二次确认；卡片改横版、网格随屏宽自适应。",
+      "v0.1.5": "识别前预去重加速；历史记录按媒体身份合并、订阅历史支持电影/剧集筛选。",
+      "v0.1.4": "修复了一些问题。",
+      "v0.1.3": "优化了一些问题。",
+      "v0.1.2": "前端 UI 全量 i18n（简体/繁體/English）；奈飞榜单支持『地区 × 媒体类型』组合；外部榜单源支持代理访问。",
+      "v0.1.1": "优化：UI界面调整。",
+      "v0.1.0": "发布初版。"
+    }
+  }
+}
