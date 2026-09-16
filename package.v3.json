@@ -1,0 +1,26 @@
+{
+    "SyncMusicList": {
+        "name": "歌单同步工具",
+        "description": "同步QQ&网易云歌单到plex&emby，网易云走本地部署的 ncm-api。",
+        "labels": "音乐,媒体库",
+        "version": "8.0.0",
+        "icon": "music.png",
+        "color": "#7eabf3",
+        "author": "逗猫",
+        "level": 1,
+        "system_version": ">=3.0.0",
+        "history": {
+            "v8.0.0": "适配V3。网易云登录与取数改用本地部署的 moefurina/ncm-api，支持扫码/验证码/密码/Cookie 四种登录；移除内置 NeteaseCloudMusicApi.js 与 py_mini_racer 依赖；Plex 检索改用媒体库级 searchTracks()",
+            "v7.2": "适配v2版本",
+            "v7.1": "1. UI优化 2. 歌单去重 3. plex默认获取最高码率的歌",
+            "v7.0": "1. cookie缓存 2. 支持网抑云获取每日推荐",
+            "v6.7": "1. 优化plex搜索 2. 修复插件安装错误",
+            "v5.7": "1. 重写网易云歌单获取; 2. 优化标题后处理; 3. 优化歌手精准匹配 4. 支持多歌手单个匹配入库 5. 修复bug",
+            "v4.7": "增加精准匹配功能",
+            "v3.7": "emby支持多用户, 修复bug",
+            "v2.7": "修复bug,添加日志说明",
+            "v1.7": "支持emby",
+            "v0.7": "初始化版本音乐插件"
+          }
+    }
+}

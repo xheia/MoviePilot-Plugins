@@ -7,6 +7,7 @@
         "color": "#7eabf3",
         "author": "逗猫",
         "level": 1,
+        "v3": false,
         "history": {
             "v7.2": "适配v2版本",
             "v7.1": "1. UI优化 2. 歌单去重 3. plex默认获取最高码率的歌",
