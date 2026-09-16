@@ -6,12 +6,12 @@
     "version": "8.1.1",
     "icon": "music.png",
     "color": "#7eabf3",
-    "author": "逗猫",
+    "author": "xheia",
     "level": 1,
     "system_version": ">=3.0.0",
     "upstream": {
-      "repo": "https://github.com/baozaodetudou/MoviePilot-Plugins",
-      "author": "逗猫",
+      "repo": "https://github.com/xheia/MoviePilot-Plugins",
+      "author": "xheia",
       "base_version": "v7.2 (V2) -> 本地 V2 7.2 -> 本地 V3 8.0.0",
       "synced_at": "2026-09",
       "note": "V3 版本由本地 V2 实现适配而来；原始上游为 baozaodetudou/MoviePilot-Plugins（逗猫），详见 plugins.v3/syncmusiclist/README.md"
@@ -39,13 +39,13 @@
     "version": "1.0.0",
     "icon": "Auto_Subscribe_Assistant.png",
     "color": "#405df5",
-    "author": "Aqr-K",
+    "author": "xheia",
     "release": true,
     "level": 1,
     "system_version": ">=3.0.0",
     "upstream": {
-      "repo": "https://github.com/Aqr-K/MoviePilot-Plugins",
-      "author": "Aqr-K",
+      "repo": "https://github.com/xheia/MoviePilot-Plugins",
+      "author": "xheia",
       "base_version": "v0.2.13 (V2 实现)",
       "synced_at": "2026-09",
       "note": "V3 专用实现（v1.0.0）基于上游 v0.2.13 适配，详见 plugins.v3/automaticsubscriptionassistant/README.md"
