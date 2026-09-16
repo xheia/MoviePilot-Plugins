@@ -24,8 +24,6 @@ https://github.com/xheia/MoviePilot-Plugins
 
 ## 目录结构
 
-- `plugins.v2/`：MoviePilot V2 插件（一个插件一个子目录，子目录名为插件类名小写）
 - `plugins.v3/`：MoviePilot V3 专用插件（要求 MoviePilot >= 3.0.0）
-- `package.v2.json` / `package.v3.json`：对应版本插件市场的概要信息
+- `package.v3.json`：插件市场的概要信息
 - `icons/`：插件图标
-- `document/`：插件使用文档

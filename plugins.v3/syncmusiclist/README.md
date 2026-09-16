@@ -5,7 +5,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 原始上游 | https://github.com/baozaodetudou/MoviePilot-Plugins（作者：逗猫） |
-| 上游基线 | v7.2（V2 实现，即本仓库 `plugins.v2/syncmusiclist` 的来源） |
+| 上游基线 | v7.2（V2 实现，未随本仓库发布） |
 | 本仓库演化 | 上游 v7.2 → 本地 V2 7.2（网易云登录增强）→ 本地 V3 8.0.0（改用本地 ncm-api） |
 | 引入时间 | 2026-09 重建本仓库时确认 |
 
