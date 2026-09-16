@@ -160,3 +160,6 @@ cython_debug/
 .idea/
 /plugins/syncmusiclist/cache/
 /plugins/syncmusiclist/cookie_storage
+
+# 本仓库无 CI：Vue 联邦构建产物随仓库分发（供插件市场 zip 与 PLUGIN_LOCAL_REPO_PATHS 本地同步）
+!plugins.v3/*/frontend/dist/
