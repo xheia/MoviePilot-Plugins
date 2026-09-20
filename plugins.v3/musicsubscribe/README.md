@@ -5,9 +5,6 @@
 MoviePilot 音乐订阅。设计目标是**尽量减少人工维护**：选好场景、贴一次链接之后，
 每天定时自动同步，内容跟随官方更新。
 
-> 版本线说明：自插件更名为「歌单订阅」起，版本从 **v1.0.0** 重新起算；
-> 更早的 8.x 历史见 git 提交记录。
-
 ---
 
 ## 功能总览
@@ -26,7 +23,7 @@ MoviePilot 音乐订阅。设计目标是**尽量减少人工维护**：选好�
 
 ## 1. 部署 ncm-api（网易云取数前置条件）
 
-网易云登录与取数全部经本地部署的 [moefurina/ncm-api](https://github.com/moefurina/ncm-api) 转发。
+网易云登录与取数全部经本地部署的 [moefurina/ncm-api](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced) 转发。
 ncm-api 默认容器端口 3000 与 MoviePilot 冲突，宿主机映射端口统一用 **1630**。
 
 ### 方式一：与 MoviePilot 同一个 docker-compose（推荐）
