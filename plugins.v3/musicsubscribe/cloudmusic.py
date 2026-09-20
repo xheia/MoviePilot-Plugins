@@ -27,6 +27,20 @@ QR_STATUS = {
 #: 状态码 803 表示扫码授权完成。
 QR_STATUS_SUCCESS = 803
 
+#: ncm-api / 网易云常见返回码的中文解释。
+#: 每日推荐这类接口失败时网易只回一个 code，不解释原因，这里统一翻译成可读文案，
+#: 避免插件把「未登录 / 风控 / 空数据」都当成「没问题，只是没歌」。
+NCM_CODE_HINT = {
+    301: "需要登录（Cookie 已失效或未登录），请重新登录网易云",
+    302: "需要登录",
+    400: "请求参数错误",
+    401: "登录状态异常，请重新登录",
+    460: "触发网易风控（cheating），请降低请求频率后重试",
+    462: "网易要求二次验证，请到网易云 App 完成验证",
+    502: "网易侧返回错误（多出现在密码登录）",
+    503: "网易侧限流，请稍后再试",
+}
+
 
 class CloudMusic:
     """网易云歌单与登录业务层。"""
@@ -259,9 +273,19 @@ class CloudMusic:
         return self.api.daily_signin()
 
     def get_list_days(self, nums: int = 5) -> List[List[Any]]:
-        """每日推荐歌单，返回 ``[[歌单id, 歌单名], ...]``。"""
+        """每日推荐歌单，返回 ``[[歌单id, 歌单名], ...]``。
+
+        接口失败或返回空列表时抛 :class:`NcmApiError`，把失败原因带到调用方，
+        避免上游只看到一个空列表而误判成「没有歌可同步」。
+        """
         result = self.api.recommend_playlists()
+        self._check_result(result, "获取每日推荐歌单")
         recommend = result.get("recommend") or []
+        if not recommend:
+            raise NcmApiError(
+                "获取每日推荐歌单失败：网易云返回的推荐列表为空"
+                "（常见原因：账号未登录、Cookie 已失效，或当日推荐尚未生成）"
+            )
         return [
             [item.get("id"), item.get("name")]
             for item in recommend[:nums]
@@ -269,10 +293,83 @@ class CloudMusic:
         ]
 
     def get_song_daily(self) -> List[List[Any]]:
-        """每日推荐歌曲，返回 ``[[歌名, [歌手, ...]], ...]``。"""
+        """每日推荐歌曲，返回 ``[[歌名, [歌手, ...]], ...]``。
+
+        与 :meth:`get_list_days` 同样在失败时抛异常，不再静默返回空列表。
+        """
         result = self.api.recommend_songs()
+        self._check_result(result, "获取每日推荐歌曲")
         daily_songs = (result.get("data") or {}).get("dailySongs") or []
+        if not daily_songs:
+            raise NcmApiError(
+                "获取每日推荐歌曲失败：网易云返回的 dailySongs 为空"
+                "（常见原因：账号未登录、Cookie 已失效，或当日推荐尚未生成）"
+            )
         return [self._to_track(song) for song in daily_songs]
+
+    def diagnose_recommend(self) -> Dict[str, Any]:
+        """探测每日推荐的两个接口，返回可读结果，供配置页与日志排错。
+
+        只做只读探测，不抛异常，任何错误都收敛进返回值。
+        """
+        report: Dict[str, Any] = {}
+        for key, label, call in (
+            ("daily_list", "每日推荐歌单", self.api.recommend_playlists),
+            ("daily_song", "每日推荐歌曲", self.api.recommend_songs),
+        ):
+            try:
+                result = call()
+                code = self._result_code(result)
+                if key == "daily_list":
+                    count = len(result.get("recommend") or [])
+                else:
+                    count = len((result.get("data") or {}).get("dailySongs") or [])
+                message = result.get("message") or result.get("msg") or ""
+                if code == 200 and count == 0:
+                    message = message or "接口正常但返回空数据（多半是未登录或当日推荐为空）"
+                if code != 200 and not message:
+                    message = NCM_CODE_HINT.get(code, "未知错误")
+                report[key] = {
+                    "label": label,
+                    "ok": code == 200 and count > 0,
+                    "code": code,
+                    "count": count,
+                    "message": message,
+                }
+            except Exception as error:  # noqa: BLE001 - 探针本身不能抛
+                report[key] = {
+                    "label": label,
+                    "ok": False,
+                    "code": None,
+                    "count": 0,
+                    "message": str(error),
+                }
+        return report
+
+    @staticmethod
+    def _result_code(result: Dict[str, Any]) -> int:
+        """取出返回体里的业务码，字段缺失时视为成功（兼容老版本 ncm-api）。"""
+        raw = result.get("code", result.get("status", 200))
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 200
+
+    def _check_result(self, result: Dict[str, Any], action: str) -> None:
+        """校验返回码，失败时抛出带中文原因的 :class:`NcmApiError`。"""
+        code = self._result_code(result)
+        if code == 200:
+            return
+        reason = result.get("message") or result.get("msg") or ""
+        hint = NCM_CODE_HINT.get(code)
+        if hint and (not reason or str(reason) in hint):
+            # 上游只回了「需要登录」这类短语，用带排查建议的文案替代，避免重复堆叠
+            reason = hint
+        elif hint:
+            reason = f"{reason}（{hint}）"
+        elif not reason:
+            reason = "未知错误"
+        raise NcmApiError(f"{action}失败：code={code}，{reason}")
 
     def playlist(self, playlist_id: str) -> List[Dict[str, Any]]:
         """获取歌单全部歌曲的原始列表。"""

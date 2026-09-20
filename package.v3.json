@@ -1,9 +1,9 @@
 {
   "MusicSubscribe": {
     "name": "歌单同步订阅工具",
-    "description": "同步QQ&网易云歌单&汽水音乐到plex&emby，网易云走本地部署的 ncm-api。",
+    "description": "同步QQ&网易云&汽水音乐歌单到plex&emby，网易云走本地部署的 ncm-api；库内没有的歌曲可自动转为音乐订阅。",
     "labels": "音乐,媒体库",
-    "version": "8.2.0",
+    "version": "8.3.0",
     "icon": "music.png",
     "color": "#7eabf3",
     "author": "xheia",
@@ -17,6 +17,7 @@
       "note": "V3 版本由本地 V2 实现适配而来；原始上游为 baozaodetudou/MoviePilot-Plugins（逗猫），详见 plugins.v3/syncmusiclist/README.md"
     },
     "history": {
+      "v8.3.0": "1. 汽水音乐与网易云配置分开（新增独立的汽水音乐歌单同步设置，旧混填方式仍兼容） 2. 修复每日推荐歌单/歌曲同步静默失败：校验 ncm-api 返回码并输出可读原因、同步时实时复查登录态、新增「诊断每日推荐接口」按钮与 /diagnose 接口 3. 修复单行配置格式不规范会中断整轮同步的缺陷（return 改 continue） 4. 新增插件详情页：同步情况、同步明细、订阅数量与订阅明细 5. 新增音乐订阅管理：按 ID 删除 / 清理本插件订阅 / 清理身份不完整订阅，并开放 subscribes 系列接口",
       "v8.2.0": "1. 插件更名为「歌单订阅」（目录 plugins.v3/musicsubscribe，ID MusicSubscribe） 2. 移除 realIP / 随机中国 IP / 超时配置，简化使用说明 3. 新增：库内没有的歌曲可自动转为 MoviePilot 音乐订阅 4. 新增：支持导入汽水音乐歌单（App 内复制分享链接即可）",
       "v8.1.1": "修复配置页空白：show 条件表达式不能拼接 {{}} 片段（前端渲染抛异常），改为整体单表达式",
       "v8.1.0": "1. 登录方式联动显示：选哪种方式只显示对应栏位，点「获取二维码」直接出码，各登录按钮即时生效 2. ncm-api 默认端口改为 1630（避开 MoviePilot 默认端口冲突） 3. 防风控：支持 realIP/随机中国 IP、请求节流、时间戳防缓存 4. 新增 Cookie 保活（每天检查并尝试刷新，密码方式失效自动重登）",
