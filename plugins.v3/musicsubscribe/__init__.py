@@ -11,6 +11,7 @@ V3 版本的两处关键变化：
 2. 登录方式支持扫码、短信验证码、手机号/邮箱密码、手动粘贴 Cookie 四种。
 """
 
+import re
 import time
 from datetime import datetime, timedelta
 from threading import Event
@@ -30,6 +31,7 @@ from .cloudmusic import QR_STATUS, QR_STATUS_SUCCESS, CloudMusic
 from .emby_music import EmbyMusic
 from .ncm_api import NcmApiClient, NcmApiError
 from .plex_music import PlexMusic
+from .qishui import QishuiClient, QishuiError, looks_like_qishui_link
 
 # --------------------------------------------------------------------------
 # 配置页按钮交互脚本。
@@ -43,7 +45,7 @@ async function (event) {
   probe_loading = true;
   try {
     const resp = await window.MoviePilotAPI.get(
-      'plugin/SyncMusicList/probe?api_url=' + encodeURIComponent(ncm_api_url || '')
+      'plugin/MusicSubscribe/probe?api_url=' + encodeURIComponent(ncm_api_url || '')
     );
     if (resp && resp.success) {
       probe_msg = '连接成功，ncm-api 版本：' + ((resp.data && resp.data.version) || '未知');
@@ -63,7 +65,7 @@ async function (event) {
   qr_loading = true;
   try {
     const resp = await window.MoviePilotAPI.post(
-      'plugin/SyncMusicList/qrcode?api_url=' + encodeURIComponent(ncm_api_url || '')
+      'plugin/MusicSubscribe/qrcode?api_url=' + encodeURIComponent(ncm_api_url || '')
     );
     const data = (resp && resp.data) || {};
     if (resp && resp.success && data.qrimg) {
@@ -86,7 +88,7 @@ JS_QR_CHECK = """
 async function (event) {
   qr_loading = true;
   try {
-    const resp = await window.MoviePilotAPI.get('plugin/SyncMusicList/qrcode/status');
+    const resp = await window.MoviePilotAPI.get('plugin/MusicSubscribe/qrcode/status');
     const data = (resp && resp.data) || {};
     if (resp && resp.success) {
       if (data.logged_in) {
@@ -115,7 +117,7 @@ async function (event) {
   }
   try {
     const resp = await window.MoviePilotAPI.post(
-      'plugin/SyncMusicList/captcha/send?phone=' + encodeURIComponent(wylogin_user || '')
+      'plugin/MusicSubscribe/captcha/send?phone=' + encodeURIComponent(wylogin_user || '')
       + '&api_url=' + encodeURIComponent(ncm_api_url || '')
     );
     login_msg = (resp && resp.message) || '验证码发送失败';
@@ -136,7 +138,7 @@ async function (event) {
     params.set('password', wylogin_password || '');
     params.set('cookie', wylogin_cookie || '');
     const resp = await window.MoviePilotAPI.post(
-      'plugin/SyncMusicList/login?' + params.toString()
+      'plugin/MusicSubscribe/login?' + params.toString()
     );
     if (resp && resp.success) {
       login_msg = resp.message || '登录成功';
@@ -157,15 +159,15 @@ JS_LOGIN_PASSWORD = JS_LOGIN_TEMPLATE % {'login_type': 'password'}
 JS_LOGIN_COOKIE = JS_LOGIN_TEMPLATE % {'login_type': 'cookie'}
 
 
-class SyncMusicList(_PluginBase):
+class MusicSubscribe(_PluginBase):
     # 插件名称
-    plugin_name = "歌单同步工具"
+    plugin_name = "歌单订阅"
     # 插件描述
-    plugin_desc = "同步QQ&网易云歌单到plex&emby，网易云走本地部署的 ncm-api。"
+    plugin_desc = "歌单订阅：同步QQ&网易云&汽水音乐歌单到plex&emby，库内没有的歌曲可转为音乐订阅。"
     # 插件图标
     plugin_icon = "music.png"
     # 插件版本
-    plugin_version = "8.1.1"
+    plugin_version = "8.2.0"
     # 插件作者
     plugin_author = "逗猫"
     # 作者主页
@@ -203,12 +205,8 @@ class SyncMusicList(_PluginBase):
     _media_server: List[str] = []
     # 精准匹配开关
     _exact_match = True
-    # ncm-api 服务地址与超时
+    # ncm-api 服务地址
     _ncm_api_url = DEFAULT_NCM_API_URL
-    _ncm_api_timeout = 15
-    # ncm-api 防风控参数：realIP 指定国内 IP，randomCNIP 用随机中国 IP
-    _ncm_real_ip = ""
-    _ncm_random_ip = False
     # 网易云登录方式：qrcode / captcha / password / cookie
     _login_type = "qrcode"
     # 网易云登录信息（按登录方式复用：用户名 + 密码/验证码 + Cookie）
@@ -257,10 +255,6 @@ class SyncMusicList(_PluginBase):
         self._ncm_api_url = (
             config.get("ncm_api_url") or self.DEFAULT_NCM_API_URL
         ).strip()
-        self._ncm_api_timeout = self._parse_timeout(config.get("ncm_api_timeout"))
-        # 防风控参数
-        self._ncm_real_ip = (config.get("ncm_real_ip") or "").strip()
-        self._ncm_random_ip = bool(config.get("ncm_random_ip"))
         self._login_type = config.get("login_type") or "qrcode"
         self._wylogin_user = config.get("wylogin_user") or ""
         self._wylogin_password = config.get("wylogin_password") or ""
@@ -273,6 +267,8 @@ class SyncMusicList(_PluginBase):
         self._qqmusic_paths = config.get("qqmusic_paths") or ""
         self._wy_daily_list = bool(config.get("wy_daily_list"))
         self._wy_daily_song = bool(config.get("wy_daily_song"))
+        # 库内没有的歌曲是否转为 MoviePilot 音乐订阅
+        self._wy_subscribe = bool(config.get("wy_subscribe"))
 
         # 配置页交互字段（二维码图片、提示消息等）只存在于表单模型，
         # 保存时会被前端原样带回，这里剔除后写回，避免污染持久化配置
@@ -282,9 +278,6 @@ class SyncMusicList(_PluginBase):
         self.cm = CloudMusic(
             base_url=self._ncm_api_url,
             data_path=self.get_data_path(),
-            timeout=self._ncm_api_timeout,
-            real_ip=self._ncm_real_ip,
-            random_cn_ip=self._ncm_random_ip,
         )
 
         # 媒体服务器列表
@@ -359,7 +352,7 @@ class SyncMusicList(_PluginBase):
     def get_api(self) -> List[Dict[str, Any]]:
         """注册登录与状态查询接口，方便脚本或前端直接驱动。
 
-        完整路径为 ``/api/v1/plugin/SyncMusicList/<path>``，
+        完整路径为 ``/api/v1/plugin/MusicSubscribe/<path>``，
         返回 ``{success, message, data}`` 信封。
         """
         return [
@@ -426,7 +419,7 @@ class SyncMusicList(_PluginBase):
     # ------------------------------------------------------------------
 
     def _make_client(self, api_url: Optional[str]) -> CloudMusic:
-        """按指定服务地址构建临时客户端，复用 Cookie 缓存目录与防风控配置。
+        """按指定服务地址构建临时客户端，复用 Cookie 缓存目录。
 
         配置页按钮允许在保存之前就用「表单里正在编辑的地址」发起请求。
         """
@@ -436,9 +429,6 @@ class SyncMusicList(_PluginBase):
         return CloudMusic(
             base_url=url,
             data_path=self.get_data_path(),
-            timeout=self._ncm_api_timeout,
-            real_ip=self._ncm_real_ip,
-            random_cn_ip=self._ncm_random_ip,
         )
 
     def api_probe(self, api_url: Optional[str] = None) -> Dict[str, Any]:
@@ -633,33 +623,8 @@ class SyncMusicList(_PluginBase):
                             'placeholder': 'http://192.168.1.100:1630',
                         },
                     }),
-                    self._col(3, {
-                        'component': 'VTextField',
-                        'props': {
-                            'model': 'ncm_api_timeout',
-                            'label': '超时(秒)',
-                            'type': 'number',
-                            'placeholder': '15',
-                        },
-                    }),
-                    self._col(3, self._button(
+                    self._col(6, self._button(
                         '测试连接', JS_PROBE, color='info', loading_model='probe_loading',
-                    )),
-                ],
-            },
-            {
-                'component': 'VRow',
-                'content': [
-                    self._col(6, {
-                        'component': 'VTextField',
-                        'props': {
-                            'model': 'ncm_real_ip',
-                            'label': 'realIP（可选，遇到 460 cheating 时填国内 IP）',
-                            'placeholder': '如 116.25.146.177，留空不启用',
-                        },
-                    }),
-                    self._col(6, self._switch(
-                        'ncm_random_ip', '随机中国 IP（防 460 风控，与 realIP 二选一）',
                     )),
                 ],
             },
@@ -692,8 +657,9 @@ class SyncMusicList(_PluginBase):
             {
                 'component': 'VRow',
                 'content': [
-                    self._col(6, self._switch('wy_daily_song', '同步每日推荐歌曲')),
-                    self._col(6, self._switch('wy_daily_list', '同步每日推荐歌单')),
+                    self._col(4, self._switch('wy_daily_song', '同步每日推荐歌曲')),
+                    self._col(4, self._switch('wy_daily_list', '同步每日推荐歌单')),
+                    self._col(4, self._switch('wy_subscribe', '库内没有的歌曲转为音乐订阅')),
                 ],
             },
             {
@@ -738,12 +704,10 @@ class SyncMusicList(_PluginBase):
                                     'rows': 4,
                                     'placeholder':
                                         '一行一个歌单配置留空不启用 \n'
-                                        '默认格式：网易云歌单id:plex/emby播放列表名称\n'
-                                        'eg: 2362260213:经典歌曲\n'
-                                        'emby多用户格式：网易云歌单id:plex/emby播放列表名称:emby用户名 \n'
-                                        'eg: 2362260213:经典歌曲:doumao\n'
-                                        'emby多用户格式：网易云歌单id:plex/emby播放列表名称:emby1,emby2 \n'
-                                        'eg: 2362260213:经典歌曲:doumao,tudou\n',
+                                        '网易云格式：歌单id:播放列表名称[:emby用户名] \n'
+                                        'eg: 2362260213:经典歌曲 \n'
+                                        '汽水音乐：粘贴App里的歌单分享链接:播放列表名称 \n'
+                                        'eg: https://qishui.douyin.com/xxxx:华语精选 \n',
                                 },
                             }
                         ],
@@ -764,24 +728,13 @@ class SyncMusicList(_PluginBase):
                                     'variant': 'tonal',
                                     'title': '使用说明:',
                                     'text':
-                                        '0. 需先部署 ncm-api（默认容器端口 3000 与 MoviePilot 冲突，'
-                                        '宿主机端口建议映射为 1630）：docker run -d --name ncm-api '
+                                        '1. 部署 ncm-api：docker run -d --name ncm-api '
                                         '-p 1630:3000 moefurina/ncm-api:latest，'
                                         '地址填 http://192.168.X.X:1630; \n'
-                                        '1. 网易云登录：选择登录方式后页面只显示对应栏位，'
-                                        '扫码登录点「获取二维码」直接出码，扫码确认后点「检查扫码结果」; \n'
-                                        '2. 防风控：不要频繁调登录接口，登录状态还在就不要重复登录；'
-                                        '遇到 460 cheating 异常时可填写 realIP（国内 IP）或开启随机中国 IP; \n'
-                                        '3. 密码登录风控最严（网易网易云盾），推荐扫码或短信验证码登录; \n'
-                                        '4. 已开启 Cookie 保活时每天自动检查登录状态并尝试刷新（扫码登录的 Cookie 不支持刷新）; \n'
-                                        '5. 耗时很长，建议每天一次即可，短时间重复运行会卡死; \n'
-                                        '6. 登录后支持每日推荐歌单与每日推荐歌曲的同步; \n'
-                                        '7. plex/emby服务器中存在音乐类型的库; \n'
-                                        '8. plex/emby的播放列表需要提前创建好并且里边至少有一首歌曲; \n'
-                                        '9. 如不存在会自动创建歌单, 如库中没符合的歌曲会创建失败; \n'
-                                        '10. 歌单同步只会搜索已存在歌曲进行添加,不会自动下载; \n'
-                                        '11. 歌曲匹配是模糊匹配只匹配曲名不匹配歌手，打开精准匹配后通过歌手过滤; \n'
-                                        '12. emby支持多用户设置，plex自带分享无需创建; \n',
+                                        '2. 登录后选择歌单同步（一行一个，支持汽水音乐分享链接）; \n'
+                                        '3. 开启「库内没有的歌曲转为音乐订阅」后，'
+                                        '同步时没搜到的歌曲会自动加入 MoviePilot 音乐订阅; \n'
+                                        '4. 同步只添加媒体库已有歌曲，不会自动下载; \n',
                                 },
                             }
                         ],
@@ -797,14 +750,12 @@ class SyncMusicList(_PluginBase):
             "media_server": [],
             "exact_match": True,
             "ncm_api_url": self.DEFAULT_NCM_API_URL,
-            "ncm_api_timeout": 15,
-            "ncm_real_ip": "",
-            "ncm_random_ip": False,
             "login_type": "qrcode",
             "wylogin_user": "",
             "wylogin_password": "",
             "wylogin_cookie": "",
             "wy_keepalive": True,
+            "wy_subscribe": False,
             "wy_daily_song": False,
             "wy_daily_list": False,
             "wymusic_paths": "",
@@ -1079,15 +1030,6 @@ class SyncMusicList(_PluginBase):
     # 登录状态与登录动作
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _parse_timeout(value: Any) -> int:
-        """把配置里的超时值转成合法的秒数。"""
-        try:
-            timeout = int(value)
-        except (TypeError, ValueError):
-            return 15
-        return timeout if timeout > 0 else 15
-
     def _load_login_state(self) -> None:
         """刷新账号状态文案，供配置页展示。"""
         self._username: Optional[str] = None
@@ -1143,13 +1085,14 @@ class SyncMusicList(_PluginBase):
             "media_server": self._media_server,
             "exact_match": self._exact_match,
             "ncm_api_url": self._ncm_api_url,
-            "ncm_api_timeout": self._ncm_api_timeout,
             "login_type": self._login_type,
             "wylogin_user": self._wylogin_user,
             "wylogin_password": self._wylogin_password,
             "wylogin_cookie": self._wylogin_cookie,
             "wymusic_paths": self._wymusic_paths,
             "qqmusic_paths": self._qqmusic_paths,
+            "wy_keepalive": self._wy_keepalive,
+            "wy_subscribe": self._wy_subscribe,
             "wy_daily_list": self._wy_daily_list,
             "wy_daily_song": self._wy_daily_song,
             "qr_get": False,
@@ -1245,7 +1188,7 @@ class SyncMusicList(_PluginBase):
         services: List[Dict[str, Any]] = []
         if self._enabled:
             services.append({
-                "id": "SyncMusicList",
+                "id": "MusicSubscribe",
                 "name": "歌单同步",
                 "trigger": CronTrigger.from_crontab(self._cron or "0 7 * * *"),
                 "func": self.__run_sync_paylist,
@@ -1254,7 +1197,7 @@ class SyncMusicList(_PluginBase):
         # Cookie 保活独立于同步开关：只要求插件启用且登录过
         if self._wy_keepalive and self.cm and self.cm.cookie:
             services.append({
-                "id": "SyncMusicListKeepalive",
+                "id": "MusicSubscribeKeepalive",
                 "name": "网易云Cookie保活",
                 "trigger": CronTrigger.from_crontab("0 9 * * *"),
                 "func": self._keepalive_login,
@@ -1348,7 +1291,14 @@ class SyncMusicList(_PluginBase):
                     self.__t_emby(qq_tracks, media_playlist, emby_users)
 
             for path in wymusic_paths:
-                data_list = path.strip().split(':')
+                path = path.strip()
+                if not path:
+                    continue
+                # 汽水音乐分享链接：链接:播放列表名称[:emby用户名]，链接经公共解析服务取歌
+                if looks_like_qishui_link(path):
+                    self._sync_qishui(path, server, emby_users)
+                    continue
+                data_list = path.split(':')
                 if len(data_list) == 2:
                     wy_play_id, media_playlist = data_list[0], data_list[1]
                 elif len(data_list) == 3:
@@ -1387,6 +1337,79 @@ class SyncMusicList(_PluginBase):
                         logger.error(e)
                         logger.error("每日推荐更新失败")
         return
+
+    _QISHUI_LINK_RE = re.compile(r"https?://[^\s:：]+")
+
+    def _add_music_subscribes(self, t_tracks, missing_titles) -> None:
+        """把同步时在媒体库里没搜到的歌曲转为 MoviePilot 音乐订阅。
+
+        宿主 V3 提供完整的音乐订阅链路（MusicBrainz 等识别源），这里只负责
+        把缺歌信息递给 SubscribeChain；识别失败的音乐记日志跳过，不影响同步。
+        """
+        if not missing_titles or not self._wy_subscribe:
+            return
+        try:
+            from app.chain.subscribe import SubscribeChain
+            from app.schemas.types import MediaType
+        except Exception as error:  # noqa: BLE001 - 宿主过旧或音乐链未启用
+            logger.warning(f"宿主不支持音乐订阅，跳过转订阅（{error}）")
+            return
+        # 给识别链多一个线索：标题带上第一位歌手
+        artist_map: Dict[str, str] = {}
+        for track in t_tracks:
+            if track and track[0] in missing_titles and track[0] not in artist_map:
+                artists = track[1] if len(track) > 1 and track[1] else []
+                artist_map[track[0]] = artists[0] if artists else ""
+        chain = SubscribeChain()
+        added = exists = failed = 0
+        for title in missing_titles:
+            keyword = f"{artist_map.get(title, '')} {title}".strip()
+            try:
+                subscribe_id, message = chain.add(
+                    title=keyword,
+                    year="",
+                    mtype=MediaType.MUSIC,
+                    music_type="recording",
+                    exist_ok=True,
+                    message=False,
+                )
+            except Exception as error:  # noqa: BLE001 - 单首失败不中断整批
+                failed += 1
+                logger.warning(f"音乐订阅失败[{keyword}]：{error}")
+                continue
+            if subscribe_id:
+                added += 1
+                logger.info(f"音乐订阅成功：{keyword}")
+            else:
+                exists += 1
+                logger.info(f"音乐订阅未新增：{keyword}（{message}）")
+        logger.info(
+            f"音乐订阅处理完成：新增 {added}，已存在/未识别 {exists}，失败 {failed}")
+
+    def _sync_qishui(self, path, server, emby_users):
+        """同步一行汽水音乐歌单配置（链接:播放列表名称[:emby用户名]）。"""
+        match = self._QISHUI_LINK_RE.search(path)
+        if not match:
+            logger.warning(f"汽水音乐配置缺少分享链接：{path}")
+            return
+        link = match.group(0)
+        remainder = path[match.end():].strip()
+        media_playlist, _, user_part = remainder.lstrip(':：').partition(':')
+        media_playlist = media_playlist.strip()
+        users = [u.strip() for u in user_part.split(',') if u.strip()] if user_part else emby_users
+        try:
+            playlist_name, tracks = QishuiClient().parse_playlist(link)
+        except QishuiError as error:
+            logger.error(f"汽水音乐歌单解析失败：{error}")
+            return
+        media_playlist = media_playlist or playlist_name
+        logger.info(
+            f"汽水音乐歌单[{playlist_name}]解析到歌曲[{len(tracks)}]首，"
+            f"目标播放列表: {media_playlist}")
+        if server.type == 'plex':
+            self.__t_plex(tracks, media_playlist)
+        elif server.type == 'emby':
+            self.__t_emby(tracks, media_playlist, users)
 
     def cm_emby_plex(self, wy_play_id, media_playlist, emby_users, media_type):
         """把单份网易云歌单同步到当前媒体服务器。"""
@@ -1427,16 +1450,18 @@ class SyncMusicList(_PluginBase):
             em.set_tracks_to_playlist(playlist_id, ','.join(ids))
         else:
             em.create_playlist(media_playlist, ','.join(tracks))
-        _, new_music_ids, _ = em.get_tracks_by_playlist(media_playlist)
+        _, final_ids, final_names = em.get_tracks_by_playlist(media_playlist)
+        missing = [i[0] for i in t_tracks if i[0] not in set(final_names or [])]
+        self._add_music_subscribes(t_tracks, missing)
         for user in other_users:
             em.user = em.get_user(user)
             em.get_music_library()
             user_playlist_id, user_music_ids, _ = em.get_tracks_by_playlist(media_playlist)
             if user_playlist_id:
-                new_ids = [i for i in new_music_ids if i not in user_music_ids]
+                new_ids = [i for i in final_ids if i not in user_music_ids]
                 em.set_tracks_to_playlist(user_playlist_id, ','.join(new_ids), user)
             else:
-                em.create_playlist(media_playlist, ','.join(new_music_ids), user)
+                em.create_playlist(media_playlist, ','.join(final_ids), user)
 
         logger.info("Emby同步歌单完成,感谢耐心等待.......")
         logger.info("歌单同步完成，END")
@@ -1467,6 +1492,7 @@ class SyncMusicList(_PluginBase):
         }.values())
         no_list = list(set(i[0] for i in t_tracks) - set([i.title for i in add_tracks]) - set(i[0] for i in old_tracks))
         logger.info(f"Plex库中未搜到歌曲[{len(no_list)}]首,列表为: {no_list}")
+        self._add_music_subscribes(t_tracks, no_list)
         # 有歌曲写入没有就跳过
         if len(add_tracks) > 0:
             if len(plex_tracks) < 1:

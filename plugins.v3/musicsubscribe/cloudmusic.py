@@ -41,23 +41,14 @@ class CloudMusic:
         base_url: Optional[str] = None,
         data_path: Optional[Path] = None,
         timeout: int = 15,
-        real_ip: str = "",
-        random_cn_ip: bool = False,
     ) -> None:
         """
         :param base_url: ncm-api 服务地址，例如 ``http://192.168.1.10:1630``
         :param data_path: 插件数据目录，Cookie 缓存写入这里
         :param timeout: 单次请求超时（秒）
-        :param real_ip: 传给 ncm-api 的 realIP 参数，用于绕过 460 cheating 风控
-        :param random_cn_ip: 是否让 ncm-api 使用随机中国 IP 发起请求
         """
         self.data_path = Path(data_path) if data_path else None
-        self.api = NcmApiClient(
-            base_url,
-            timeout=timeout,
-            real_ip=real_ip,
-            random_cn_ip=random_cn_ip,
-        )
+        self.api = NcmApiClient(base_url, timeout=timeout)
         self._cookie_loaded = False
 
     # ------------------------------------------------------------------

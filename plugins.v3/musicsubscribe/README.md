@@ -1,4 +1,4 @@
-# 歌单同步工具（MoviePilot V3）
+# 歌单订阅（MoviePilot V3）
 
 ## 上游引用
 
@@ -77,16 +77,11 @@ MoviePilot 在容器里，访问宿主机端口用 `http://host.docker.internal:
 地址可以省略 `http://` 前缀，插件会自动补，末尾多余的 `/` 也会去掉。
 填完可以点旁边的「测试连接」按钮，不用保存配置就能验证地址是否可用。
 
-### 防风控（realIP / 随机中国 IP）
+### 防风控
 
-ncm-api 部署在国外服务器或部分国内云主机上时，网易会返回 `460 cheating` 异常。
-两种解法（二选一）：
-
-- **realIP**：填一个国内 IP（如 `116.25.146.177`），插件会把它作为 `realIP` 参数传给 ncm-api；
-- **随机中国 IP**：打开开关，ncm-api 每次请求自动使用随机中国 IP（需要 ncm-api 镜像支持）。
-
-另外插件内置了两项防风控措施：所有请求自动带时间戳参数避开 ncm-api 的 2 分钟缓存，
-相邻请求之间强制 0.3~0.8 秒随机间隔，避免触发网易 IP 高频限制。
+插件内置了两项防风控措施：所有请求自动带时间戳参数避开 ncm-api 的 2 分钟缓存，
+相邻请求之间强制 0.3~0.8 秒随机间隔，避免触发网易 IP 高频限制；
+登录状态还在时不会重复调登录接口。
 
 ### 网易云登录方式
 
@@ -118,12 +113,25 @@ Cookie 失效时，密码登录方式会用保存的账号密码自动重登，�
 # 带 Emby 多用户（第三个字段）
 365436873:我的歌单:emby用户名
 365436873:我的歌单:emby1,emby2
+# 汽水音乐：粘贴 App 里的歌单分享链接
+https://qishui.douyin.com/xxxx:华语精选
+https://qishui.douyin.com/xxxx:华语精选:emby用户名
 ```
 
 QQ 音乐歌单同理，填在「QQ音乐歌单同步」里。
 
 > QQ 音乐歌单 id 取自歌单链接 `https://y.qq.com/n/ryqq/playlist/歌单id`；
-> 网易云歌单 id 取自 `https://music.163.com/#/playlist?id=歌单id`。
+> 网易云歌单 id 取自 `https://music.163.com/#/playlist?id=歌单id`；
+> 汽水音乐在 App 里点歌单右上角「分享」复制链接即可，链接经
+> [PlaylistOut](https://github.com/LengxiQwQ/music-playlist-exporter)
+> 公共解析服务取歌（限流 30 次/分钟），无需任何账号凭证。
+
+### 音乐订阅（库内没有的歌曲）
+
+开启「库内没有的歌曲转为音乐订阅」后，同步时在 Plex/Emby 里没搜到的歌曲
+会自动添加为 MoviePilot 音乐订阅（单曲，recording），由宿主的订阅链
+（MusicBrainz 等识别源）负责后续识别与下载；识别失败的歌曲会记日志跳过，
+不影响其余歌曲同步。
 
 ### 其他
 
@@ -142,7 +150,7 @@ QQ 音乐歌单同理，填在「QQ音乐歌单同步」里。
 
 | 项目 | v2 | v3 |
 | --- | --- | --- |
-| 目录 | `plugins.v2/syncmusiclist/` | `plugins.v3/syncmusiclist/` |
+| 目录 | `plugins.v2/syncmusiclist/` | `plugins.v3/musicsubscribe/` |
 | 索引 | `package.v2.json` | `package.v3.json` |
 | 宿主接口 | `app.core` / `app.helper` | `app.sdk` |
 | 网易云链路 | 内置 JS + py_mini_racer 直连网易 | 本地 ncm-api HTTP |
@@ -150,7 +158,7 @@ QQ 音乐歌单同理，填在「QQ音乐歌单同步」里。
 | Plex 检索 | 手工拼 `/hubs/search` | 媒体库级 `searchTracks()`（与宿主 `Plex.get_music()` 同链路） |
 | 版本 | 7.2 | 8.0.0 |
 
-版本按代际跃迁规则从 `7.2` 跳到 `8.0.0`，配置项与 v2 保持兼容，
+版本与目录名（musicsubscribe）按代际跃迁规则从 `7.2` 跳到 `8.0.0`，配置项与 v2 保持兼容，
 已配置的网易云账号密码、歌单同步列表升级后可直接沿用。
 
 ## 5. 故障排查
@@ -158,7 +166,7 @@ QQ 音乐歌单同理，填在「QQ音乐歌单同步」里。
 | 现象 | 排查方向 |
 | --- | --- |
 | 保存配置报「服务地址不可达」 | 核对地址与端口；MoviePilot 容器内 `curl http://<地址>/inner/version` 是否通 |
-| 提示 `460 cheating` | ncm-api 出口 IP 被网易限制，填 realIP（国内 IP）或开启随机中国 IP |
+| 提示 `460 cheating` | ncm-api 出口 IP 被网易限制，更换 ncm-api 部署网络（国内家宽/代理出口） |
 | 提示 `502` | 多出现在密码登录，换扫码或 Cookie 登录 |
 | 歌单拉取返回 403 / 空 | 网易云 Cookie 失效，重新扫码；ncm-api 需要更新到最新镜像 |
 | Plex 搜不到歌曲 | 确认媒体库类型是「音乐」；歌名或歌手在库里不一致时先关掉精准匹配试一次 |
