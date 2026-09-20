@@ -1,7 +1,7 @@
 {
   "MusicSubscribe": {
-    "name": "歌单同步工具",
-    "description": "同步QQ&网易云歌单到plex&emby，网易云走本地部署的 ncm-api。",
+    "name": "歌单同步订阅工具",
+    "description": "同步QQ&网易云歌单&汽水音乐到plex&emby，网易云走本地部署的 ncm-api。",
     "labels": "音乐,媒体库",
     "version": "8.2.0",
     "icon": "music.png",
