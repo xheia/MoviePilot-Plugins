@@ -260,7 +260,7 @@ class MusicSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "music.png"
     # 插件版本
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     # 插件作者
     plugin_author = "xheia"
     # 作者主页
@@ -392,6 +392,10 @@ class MusicSubscribe(_PluginBase):
     _douban_cache: Dict[Tuple[str, str, str, str], Any] = {}
     #: 识别缓存条数上限（超出按写入顺序淘汰最早的）
     DOUBAN_CACHE_LIMIT = 500
+    #: 单轮同步收集到的库内缺失曲目：键（歌手 歌名）-> 条目（含来源与命中次数）。
+    #: 刻意不在每个歌单推完时就处理：同一首歌常同时躺在多个歌单里，逐个处理会让
+    #: 宿主对同一首歌反复识别、反复 add（第二次起只返回「已存在」）。
+    _round_missing: Dict[str, Dict[str, Any]] = {}
     # 待处理清单操作对象：序号（逗号分隔，留空表示全部）
     _pending_action_ids = ""
     # 订阅管理（保存配置时执行的一次性动作）
@@ -474,6 +478,7 @@ class MusicSubscribe(_PluginBase):
             config.get("host_fallback", self.DEFAULT_HOST_FALLBACK))
         # 每次载入配置都换一份新缓存，避免旧识别结果跨配置/跨轮次复用
         self._douban_cache = {}
+        self._round_missing = {}
         self._pending_action_ids = config.get("pending_action_ids") or ""
         # 订阅管理（保存即执行，执行后开关复位）
         self._subscribe_remove_ids = config.get("subscribe_remove_ids") or ""
@@ -2538,6 +2543,7 @@ class MusicSubscribe(_PluginBase):
         self._report = []
         self._sub_report = {"added": 0, "exists": 0, "failed": 0, "items": []}
         self._douban_cache = {}
+        self._round_missing = {}
         # 「立即运行一次」是一次性开关：只要这次运行是由它触发的，就把开关复位并
         # 落盘。放在这里而不是只在 init_plugin 里复位，是因为保存配置后宿主可能
         # 再回写一次配置，仅靠 init_plugin 复位会留下「配置页上还开着」的残留。
@@ -2553,6 +2559,13 @@ class MusicSubscribe(_PluginBase):
             error = str(exc)
             logger.error(f"歌单同步异常终止：{exc}", exc_info=True)
         finally:
+            # 所有歌单推完之后，统一处理本轮收集到的缺歌（去重后的结果）。
+            # 放在 finally 里是为了即使中途某个歌单出错，也不丢掉已经发现的缺歌；
+            # 必须在 _save_sync_stats 之前，订阅结果才会进本次统计。
+            try:
+                self._flush_missing_tracks()
+            except Exception as flush_error:  # noqa: BLE001 - 不能影响统计落盘
+                logger.error(f"缺歌统一处理失败：{flush_error}", exc_info=True)
             self._save_sync_stats({
                 "start_time": started_at,
                 "duration": round(time.time() - started, 1),
@@ -2906,42 +2919,31 @@ class MusicSubscribe(_PluginBase):
                 continue
         return seq + 1
 
-    def _cache_missing_tracks(
-        self,
-        t_tracks: List[Any],
-        missing_titles: List[str],
-        source: str = "",
-        server: str = "",
-        playlist: str = "",
-    ) -> int:
+    def _cache_missing_tracks(self, collected: List[Dict[str, Any]]) -> int:
         """把库里缺失的曲目写进本地待处理清单。
 
+        入参是 ``_collect_missing_tracks`` 收集并**跨歌单去重**后的条目，
+        每条自带来源（source/server/playlist）与命中次数（hits）。
         已存在的条目只累加命中次数与更新时间，不重复占位。
         :return: 本次新增条目数
         """
-        if not missing_titles:
+        if not collected:
             return 0
         records = self._pending_records()
         index = {item.get("key"): item for item in records}
         now = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d %H:%M:%S")
-        # 标题 -> (第一位歌手, 专辑名)
-        meta: Dict[str, Tuple[str, str]] = {}
-        for track in t_tracks or []:
-            if not track or track[0] in meta:
-                continue
-            artists = track[1] if len(track) > 1 and track[1] else []
-            album = track[2] if len(track) > 2 and track[2] else ""
-            meta[track[0]] = (artists[0] if artists else "", album)
         seq = self._next_pending_seq(records)
         added = 0
-        for title in missing_titles:
+        for item in collected:
+            title = item.get("title")
             if not title:
                 continue
-            artist, album = meta.get(title, ("", ""))
+            artist = item.get("artist") or ""
+            hits = max(int(item.get("hits") or 1), 1)
             key = self._pending_key(title, artist)
             exist = index.get(key)
             if exist:
-                exist["hits"] = int(exist.get("hits") or 1) + 1
+                exist["hits"] = int(exist.get("hits") or 1) + hits
                 exist["last_time"] = now
                 continue
             record = {
@@ -2949,11 +2951,11 @@ class MusicSubscribe(_PluginBase):
                 "key": key,
                 "title": title,
                 "artist": artist,
-                "album": album,
-                "source": source,
-                "server": server,
-                "playlist": playlist,
-                "hits": 1,
+                "album": item.get("album") or "",
+                "source": item.get("source") or "",
+                "server": item.get("server") or "",
+                "playlist": item.get("playlist") or "",
+                "hits": hits,
                 "first_time": now,
                 "last_time": now,
                 "verify_status": "",
@@ -3119,7 +3121,7 @@ class MusicSubscribe(_PluginBase):
         self._save_pending(kept)
         return removed
 
-    def _handle_missing_tracks(
+    def _collect_missing_tracks(
         self,
         t_tracks: List[Any],
         missing_titles: List[str],
@@ -3127,18 +3129,76 @@ class MusicSubscribe(_PluginBase):
         server: str = "",
         playlist: str = "",
     ) -> None:
-        """按配置的处理方式分派库内缺失曲目。"""
+        """收集本轮同步里库内缺失的曲目，**不立刻处理**。
+
+        同一首歌经常同时躺在好几个歌单里。如果按歌单逐个处理，宿主对同一首歌会
+        反复识别、反复 add（第二次起只会返回「已存在」），一次同步上百首缺歌时
+        这就是成倍的无效等待。所以这里只做「按歌名 + 歌手去重」的登记，真正的
+        处理（缓存 or 订阅）留到所有歌单都推完之后由 ``_flush_missing_tracks``
+        统一执行一次。
+        """
         titles = [title for title in (missing_titles or []) if title]
         if not titles:
             return
+        # 标题 -> (第一位歌手, 专辑名)
+        meta: Dict[str, Tuple[str, str]] = {}
+        for track in t_tracks or []:
+            if not track or track[0] in meta:
+                continue
+            artists = track[1] if len(track) > 1 and track[1] else []
+            album = track[2] if len(track) > 2 and track[2] else ""
+            meta[track[0]] = (artists[0] if artists else "", album)
+        store = self._round_missing
+        for title in titles:
+            artist, album = meta.get(title, ("", ""))
+            key = self._pending_key(title, artist)
+            exist = store.get(key)
+            if exist:
+                # 同一首歌在多个歌单里都缺：只累加命中次数，来源保留第一次看到的
+                exist["hits"] = int(exist.get("hits") or 1) + 1
+                continue
+            store[key] = {
+                "key": key,
+                "title": title,
+                "artist": artist,
+                "album": album,
+                "source": source,
+                "server": server,
+                "playlist": playlist,
+                "hits": 1,
+            }
+
+    def _flush_missing_tracks(self) -> None:
+        """所有歌单推完后，统一处理本轮收集到的缺歌（已跨歌单去重）。
+
+        按「库内缺失曲目的处理方式」分派：缓存待处理 / 立即自动转订阅 / 不处理。
+        两个副作用是刻意的：订阅只对去重后的曲目发起一次（不再对同一首歌反复
+        查询订阅）；识别缓存（``_douban_cache``）此时已经覆盖整轮，同一首歌
+        也只会被识别一次。
+        """
+        collected = list(self._round_missing.values())
+        self._round_missing = {}
+        if not collected:
+            return
+        titles = [item["title"] for item in collected]
         action = self._missing_action
+        logger.info(
+            f"全部歌单推送完成：本轮库内缺失 {len(collected)} 首"
+            f"（已按「歌名 + 歌手」跨歌单去重，处理方式：{action}）"
+        )
         if action == "off":
             logger.info(f"库内缺失 {len(titles)} 首，已按配置「不处理」跳过")
             return
         if action == "auto":
+            t_tracks = [
+                [item["title"],
+                 [item["artist"]] if item.get("artist") else [],
+                 item.get("album") or ""]
+                for item in collected
+            ]
             self._add_music_subscribes(t_tracks, titles)
             return
-        added = self._cache_missing_tracks(t_tracks, titles, source, server, playlist)
+        added = self._cache_missing_tracks(collected)
         logger.info(
             f"库内缺失 {len(titles)} 首已缓存到本地待处理清单（新增 {added} 条）："
             f"{titles[:10]}；可在配置页一键去网易云校验，再手动推送订阅"
@@ -3160,7 +3220,7 @@ class MusicSubscribe(_PluginBase):
         （推荐）/ 仅订阅所在专辑。结果累计进 ``self._sub_report`` 并登记
         订阅 id 供详情页做订阅管理。
 
-        本方法只负责订阅本身，是否调用由 ``_handle_missing_tracks`` 按
+        本方法只负责订阅本身，是否调用由 ``_flush_missing_tracks`` 按
         「库内缺失曲目的处理方式」决定（缓存待处理 / 自动订阅 / 不处理），
         配置页的「手动推送订阅」也直接复用本方法。
         """
@@ -3569,7 +3629,8 @@ class MusicSubscribe(_PluginBase):
                 em.create_playlist(media_playlist, ','.join(tracks))
             _, final_ids, final_names = em.get_tracks_by_playlist(media_playlist)
             missing = [i[0] for i in t_tracks if i[0] not in set(final_names or [])]
-            self._handle_missing_tracks(
+            # 只收集，不在这里订阅：等所有歌单推完后统一处理
+            self._collect_missing_tracks(
                 t_tracks, missing, source, server_name, media_playlist)
             for user in other_users:
                 em.user = em.get_user(user)
@@ -3625,7 +3686,8 @@ class MusicSubscribe(_PluginBase):
         }.values())
         no_list = list(set(i[0] for i in t_tracks) - set([i.title for i in add_tracks]) - set(i[0] for i in old_tracks))
         logger.info(f"Plex库中未搜到歌曲[{len(no_list)}]首,列表为: {no_list}")
-        self._add_music_subscribes(t_tracks, no_list)
+        # 只收集，不在这里订阅：等所有歌单推完后统一处理，避免同一首歌被反复识别订阅
+        self._collect_missing_tracks(t_tracks, no_list, source, server_name, media_playlist)
         # 有歌曲写入没有就跳过
         if len(add_tracks) > 0:
             if len(plex_tracks) < 1:
