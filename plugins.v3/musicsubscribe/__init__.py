@@ -260,7 +260,7 @@ class MusicSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "music.png"
     # 插件版本
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     # 插件作者
     plugin_author = "xheia"
     # 作者主页
@@ -1445,8 +1445,8 @@ class MusicSubscribe(_PluginBase):
                                 {'title': item[1], 'value': item[0]}
                                 for item in self.SUBSCRIBE_SCOPES
                             ],
-                            'hint': '按歌曲所在专辑订阅更容易被识别命中，'
-                                    '且一张专辑到齐即整单完成',
+                            'hint': '专辑优先：先按歌曲所在专辑订阅，专辑识别不到'
+                                    '再改订阅单曲；一张专辑到齐即整单完成',
                             'persistent-hint': True,
                         },
                     }),
@@ -3216,9 +3216,11 @@ class MusicSubscribe(_PluginBase):
         2. 豆瓣认不出身份时，按「豆瓣识别不到时回退宿主识别」配置决定是交给
            宿主再试一次（MusicBrainz 按标题搜索，默认关闭），还是直接记为未识别。
 
-        订阅粒度由「订阅范围」配置决定：仅单曲 / 单曲优先失败转所在专辑
-        （推荐）/ 仅订阅所在专辑。结果累计进 ``self._sub_report`` 并登记
-        订阅 id 供详情页做订阅管理。
+        订阅粒度由「订阅范围」配置决定：仅单曲 / 专辑优先、失败转单曲 /
+        仅订阅所在专辑（默认）。「专辑优先」的执行顺序就是**先专辑后单曲**：
+        先用同步时拿到的专辑名走豆瓣专辑识别，专辑梯没命中（或没认出身份）
+        才轮到单曲梯。结果累计进 ``self._sub_report`` 并登记订阅 id 供详情页
+        做订阅管理。
 
         本方法只负责订阅本身，是否调用由 ``_flush_missing_tracks`` 按
         「库内缺失曲目的处理方式」决定（缓存待处理 / 自动订阅 / 不处理），
@@ -3352,6 +3354,9 @@ class MusicSubscribe(_PluginBase):
         album: str,
     ) -> Iterator[Tuple[str, str, Optional[Any], Optional[str]]]:
         """按「订阅范围」配置逐梯产出单首缺歌的订阅尝试。
+
+        产出顺序固定为**专辑梯在前、单曲梯在后**（即「专辑优先，失败转单曲」）：
+        只有专辑梯没有产出（豆瓣没认出专辑身份）时，单曲梯才会被求值。
 
         做成生成器是有意为之：宿主识别链内部会 `run_module("recognize_media")`，
         每一次识别都会广播给所有声明该模块方法的插件（包括纯影视来源的插件），
