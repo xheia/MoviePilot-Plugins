@@ -207,9 +207,9 @@ class MusicSubscribe(_PluginBase):
     # 插件版本
     plugin_version = "1.0.0"
     # 插件作者
-    plugin_author = "逗猫"
+    plugin_author = "xheia"
     # 作者主页
-    author_url = "https://github.com/baozaodetudou"
+    author_url = "https://github.com/xheia"
     # 插件配置项ID前缀
     plugin_config_prefix = "music_"
     # 加载顺序
@@ -260,11 +260,11 @@ class MusicSubscribe(_PluginBase):
     #: 订阅范围：单曲 / 优先单曲失败转所在专辑（推荐）/ 仅专辑
     SUBSCRIBE_SCOPES = (
         ("recording", "仅单曲"),
-        ("album_first", "单曲优先，失败转所在专辑（推荐）"),
-        ("album_only", "仅订阅所在专辑"),
+        ("album_first", "单曲优先，失败转所在专辑"),
+        ("album_only", "仅订阅所在专辑（推荐）"),
     )
     #: 专辑订阅宿主要求 total_tracks 已知，识别结果缺该字段时放弃该途径
-    DEFAULT_SUBSCRIBE_SCOPE = "album_first"
+    DEFAULT_SUBSCRIBE_SCOPE = "album_only"
 
     # 私有属性
     _scheduler: Optional[BackgroundScheduler] = None
