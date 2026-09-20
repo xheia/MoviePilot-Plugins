@@ -15,7 +15,7 @@ import re
 import time
 from datetime import datetime, timedelta
 from threading import Event
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -260,7 +260,7 @@ class MusicSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "music.png"
     # 插件版本
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     # 插件作者
     plugin_author = "xheia"
     # 作者主页
@@ -332,14 +332,20 @@ class MusicSubscribe(_PluginBase):
     )
     #: 每个场景分类取热门榜前几名的第 1 个歌单（网易云按热度排序）
     LISTEN_PICK_INDEX = 0
-    #: 订阅范围：单曲 / 优先单曲失败转所在专辑（推荐）/ 仅专辑
+    #: 订阅范围：单曲 / 优先专辑失败转单曲 / 仅专辑
     SUBSCRIBE_SCOPES = (
         ("recording", "仅单曲"),
-        ("album_first", "单曲优先，失败转所在专辑"),
+        ("album_first", "专辑优先，失败转单曲"),
         ("album_only", "仅订阅所在专辑（推荐）"),
     )
     #: 专辑订阅宿主要求 total_tracks 已知，识别结果缺该字段时放弃该途径
     DEFAULT_SUBSCRIBE_SCOPE = "album_only"
+    #: 豆瓣（音乐源）认不出身份时，是否再回退到宿主的音乐识别。
+    #: 宿主的识别本质上是一次模块广播：会同时请求**所有**声明了 recognize_media
+    #: 的插件（含爱奇艺/芒果TV/腾讯视频/IMDb 这类纯影视插件），而这批插件对音乐
+    #: 毫无帮助；同时 MusicBrainz 对中文、韩文曲库命中率很低，一个整库跑下来
+    #: 新增常为 0，代价却是每首歌白等约 2 秒。因此默认关闭。
+    DEFAULT_HOST_FALLBACK = False
 
     # 私有属性
     _scheduler: Optional[BackgroundScheduler] = None
@@ -377,6 +383,15 @@ class MusicSubscribe(_PluginBase):
     _subscribe_scope = DEFAULT_SUBSCRIBE_SCOPE
     # 库内缺失曲目的处理方式：cache / auto / off
     _missing_action = DEFAULT_MISSING_ACTION
+    # 豆瓣识别不到身份时是否回退宿主识别（默认关闭）
+    _host_fallback = DEFAULT_HOST_FALLBACK
+    # 豆瓣音乐识别结果缓存，键为 (music_type, title, artist, album)。
+    # 宿主识别链内部走 run_module("recognize_media")，每一次调用都会广播给所有
+    # 声明了该模块方法的插件（含纯影视来源的插件），所以要尽量避免重复识别：
+    # 同一轮同步里同一首歌只识别一次，专辑梯命中后也不再算单曲梯。
+    _douban_cache: Dict[Tuple[str, str, str, str], Any] = {}
+    #: 识别缓存条数上限（超出按写入顺序淘汰最早的）
+    DOUBAN_CACHE_LIMIT = 500
     # 待处理清单操作对象：序号（逗号分隔，留空表示全部）
     _pending_action_ids = ""
     # 订阅管理（保存配置时执行的一次性动作）
@@ -453,6 +468,12 @@ class MusicSubscribe(_PluginBase):
         if not any(action == item[0] for item in self.MISSING_ACTIONS):
             action = "auto" if self._wy_subscribe else self.DEFAULT_MISSING_ACTION
         self._missing_action = action
+        # 豆瓣（音乐源）认不出身份时是否回退宿主识别；默认关闭，避免每首缺歌都
+        # 广播一轮 recognize_media 并白等 MusicBrainz
+        self._host_fallback = bool(
+            config.get("host_fallback", self.DEFAULT_HOST_FALLBACK))
+        # 每次载入配置都换一份新缓存，避免旧识别结果跨配置/跨轮次复用
+        self._douban_cache = {}
         self._pending_action_ids = config.get("pending_action_ids") or ""
         # 订阅管理（保存即执行，执行后开关复位）
         self._subscribe_remove_ids = config.get("subscribe_remove_ids") or ""
@@ -506,9 +527,9 @@ class MusicSubscribe(_PluginBase):
                     run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
                     name="歌单同步",
                 )
-                # 关闭一次性开关
+                # 关闭一次性开关（同时落盘，配置页下次打开就是关闭状态）
                 self._onlyonce = False
-                self._save_config()
+                self._save_config(onlyonce=False)
                 if self._scheduler.get_jobs():
                     self._scheduler.print_jobs()
                     self._scheduler.start()
@@ -984,6 +1005,8 @@ class MusicSubscribe(_PluginBase):
         records = self._match_pending(self._pending_records(), ids)
         if not records:
             return {"success": False, "message": "待处理清单为空，没有可推送的曲目", "data": {}}
+        # 手动推送是用户主动发起的动作，重新识别一次以反映最新情况
+        self._douban_cache = {}
         unverified = len([i for i in records if not i.get("verify_status")])
         stats = self._push_pending(records)
         message = f"推送完成：成功 {stats['pushed']} 条，未新增 {stats['exists']} 条"
@@ -1425,6 +1448,25 @@ class MusicSubscribe(_PluginBase):
                 ],
             },
             {
+                'component': 'VRow',
+                'content': [
+                    self._col(12, {
+                        'component': 'VSwitch',
+                        'props': {
+                            'model': 'host_fallback',
+                            'label': '豆瓣识别不到时，回退宿主识别',
+                            'hint': '关闭（推荐）：豆瓣认不出身份的歌曲直接记为'
+                                    '「未识别」并跳过，同步快很多，也不会再去唤醒'
+                                    '爱奇艺 / 芒果TV / 腾讯视频 / IMDb 等影视插件的'
+                                    '识别广播；开启：改由宿主 MusicBrainz 按标题'
+                                    '再试一次，对中文、韩文曲库命中率低，'
+                                    '每首约多等 2 秒',
+                            'persistent-hint': True,
+                        },
+                    }),
+                ],
+            },
+            {
                 'component': 'VExpansionPanels',
                 'props': {'variant': 'accordion', 'multiple': True, 'class': 'mb-2'},
                 'content': [
@@ -1643,6 +1685,7 @@ class MusicSubscribe(_PluginBase):
             "listen_extra": "",
             "subscribe_scope": self.DEFAULT_SUBSCRIBE_SCOPE,
             "missing_action": self.DEFAULT_MISSING_ACTION,
+            "host_fallback": self.DEFAULT_HOST_FALLBACK,
             "pending_action_ids": "",
             "wy_logout": False,
             "subscribe_remove_ids": "",
@@ -2349,6 +2392,7 @@ class MusicSubscribe(_PluginBase):
             "wy_daily_list": self._wy_daily_list,
             "wy_daily_song": self._wy_daily_song,
             "subscribe_remove_ids": self._subscribe_remove_ids,
+            "host_fallback": self._host_fallback,
             "qr_get": False,
             "qr_check": False,
             "captcha_sent": False,
@@ -2493,6 +2537,13 @@ class MusicSubscribe(_PluginBase):
         """
         self._report = []
         self._sub_report = {"added": 0, "exists": 0, "failed": 0, "items": []}
+        self._douban_cache = {}
+        # 「立即运行一次」是一次性开关：只要这次运行是由它触发的，就把开关复位并
+        # 落盘。放在这里而不是只在 init_plugin 里复位，是因为保存配置后宿主可能
+        # 再回写一次配置，仅靠 init_plugin 复位会留下「配置页上还开着」的残留。
+        if self._onlyonce:
+            self._onlyonce = False
+            self._save_config(onlyonce=False)
         started = time.time()
         started_at = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d %H:%M:%S")
         error = ""
@@ -3102,7 +3153,8 @@ class MusicSubscribe(_PluginBase):
 
         1. 豆瓣音乐源识别（单曲或所在专辑，中文覆盖率远高于 MusicBrainz），
            拿到身份后带 ``media_source/media_id`` 显式订阅；
-        2. 宿主默认路径兜底（MusicBrainz 按标题搜索）。
+        2. 豆瓣认不出身份时，按「豆瓣识别不到时回退宿主识别」配置决定是交给
+           宿主再试一次（MusicBrainz 按标题搜索，默认关闭），还是直接记为未识别。
 
         订阅粒度由「订阅范围」配置决定：仅单曲 / 单曲优先失败转所在专辑
         （推荐）/ 仅订阅所在专辑。结果累计进 ``self._sub_report`` 并登记
@@ -3131,9 +3183,15 @@ class MusicSubscribe(_PluginBase):
             track_map[track[0]] = (artists[0] if artists else "", album)
 
         chain = SubscribeChain()
-        added = exists = failed = 0
+        added = exists = failed = skipped = 0
+        started = time.time()
         new_records: List[Dict[str, Any]] = []
-        for title in missing_titles:
+        for index, title in enumerate(missing_titles, start=1):
+            # 缺歌多时整个阶段可能跑十几分钟，定期打点便于确认还在推进
+            if index % 20 == 0:
+                logger.info(
+                    f"缺歌转订阅进度：{index}/{len(missing_titles)}"
+                    f"（已用 {round(time.time() - started, 1)} 秒）")
             artist, album = track_map.get(title, ("", ""))
             keyword = f"{artist} {title}".strip()
             subscribed = False
@@ -3173,42 +3231,58 @@ class MusicSubscribe(_PluginBase):
                     exists += 1
                     subscribed = True
                     break
-            if not subscribed and self._subscribe_scope != "album_only":
-                # 全部梯子用尽仍未订阅成功：按宿主默认路径（MusicBrainz）兜底。
-                # 「仅订阅所在专辑」范围下不落回单曲，避免违背用户选择的粒度。
-                try:
-                    subscribe_id, message = chain.add(
-                        title=keyword,
-                        year="",
-                        mtype=MediaType.MUSIC,
-                        music_type="recording",
-                        exist_ok=True,
-                        message=False,
-                    )
-                except Exception as error:  # noqa: BLE001
-                    failed += 1
-                    logger.warning(f"音乐订阅失败[{keyword}]：{error}")
-                    continue
-                if subscribe_id:
-                    added += 1
-                    logger.info(f"音乐订阅成功：{keyword}")
-                    new_records.append({
-                        "id": subscribe_id,
-                        "title": title,
-                        "artist": artist,
-                        "keyword": keyword,
-                        "music_type": "recording",
-                    })
-                elif message and "已存在" in str(message):
-                    exists += 1
-                else:
-                    exists += 1
-                    logger.info(f"音乐订阅未新增：{keyword}（{message}）")
-            elif not subscribed:
+            if subscribed:
+                continue
+            if not self._host_fallback:
+                # 豆瓣（音乐源）没认出身份，而「宿主兜底识别」是关闭的（默认）：
+                # 直接记为未识别。宿主识别本质上是一次模块广播，会顺手唤醒所有
+                # 声明 recognize_media 的插件（含爱奇艺/芒果TV/腾讯视频/IMDb 这类
+                # 纯影视插件），而 MusicBrainz 对中文、韩文曲库命中率很低 ——
+                # 整库跑下来新增常为 0，代价却是每首歌白等约 2 秒。
                 exists += 1
-                logger.info(f"音乐订阅未新增：{title}（仅专辑范围内未找到可订阅的专辑）")
+                skipped += 1
+                logger.info(
+                    f"音乐订阅跳过：{title}（豆瓣音乐源未识别到身份，"
+                    f"宿主兜底识别已关闭）")
+                continue
+            # 开启了「宿主兜底识别」：交给宿主按标题识别（MusicBrainz）。
+            # 只试一次，避免同一首歌被宿主识别两遍（每次都会广播一轮模块调用）。
+            # 「仅订阅所在专辑」按专辑名试，其它粒度按「歌手 歌名」试单曲，
+            # 保证不违背用户选择的订阅粒度。
+            fallback_album = self._subscribe_scope == "album_only"
+            fallback_type = "album" if fallback_album else "recording"
+            fallback_title = (album or title) if fallback_album else keyword
+            try:
+                subscribe_id, message = chain.add(
+                    title=fallback_title,
+                    year="",
+                    mtype=MediaType.MUSIC,
+                    music_type=fallback_type,
+                    exist_ok=True,
+                    message=False,
+                )
+            except Exception as error:  # noqa: BLE001
+                failed += 1
+                logger.warning(f"音乐订阅失败[{fallback_title}]：{error}")
+                continue
+            if subscribe_id:
+                added += 1
+                logger.info(f"音乐订阅成功：{fallback_title}（宿主兜底识别）")
+                new_records.append({
+                    "id": subscribe_id,
+                    "title": title,
+                    "artist": artist,
+                    "keyword": fallback_title,
+                    "music_type": fallback_type,
+                })
+            elif message and "已存在" in str(message):
+                exists += 1
+            else:
+                exists += 1
+                logger.info(f"音乐订阅未新增：{fallback_title}（{message}）")
         logger.info(
-            f"音乐订阅处理完成：新增 {added}，已存在/未识别 {exists}，失败 {failed}")
+            f"音乐订阅处理完成：新增 {added}，已存在/未识别 {exists}，失败 {failed}"
+            + (f"，其中 {skipped} 首因豆瓣未识别到身份而跳过宿主兜底" if skipped else ""))
         self._accumulate_subscribes(added, exists, failed, new_records)
 
     def _subscribe_ladder(
@@ -3216,46 +3290,38 @@ class MusicSubscribe(_PluginBase):
         title: str,
         artist: str,
         album: str,
-    ) -> List[Tuple[str, str, Optional[Any], Optional[str]]]:
-        """按「订阅范围」配置生成单首缺歌的订阅尝试梯。
+    ) -> Iterator[Tuple[str, str, Optional[Any], Optional[str]]]:
+        """按「订阅范围」配置逐梯产出单首缺歌的订阅尝试。
 
-        :return: ``[(music_type, 订阅标题, media_source, media_id), ...]``；
-            ``media_source`` 为 None 的条目交给宿主按标题识别（MusicBrainz）。
+        做成生成器是有意为之：宿主识别链内部会 `run_module("recognize_media")`，
+        每一次识别都会广播给所有声明该模块方法的插件（包括纯影视来源的插件），
+        而豆瓣识别需要真实网络请求。所以单曲梯的识别**只在需要时**才发生 ——
+        专辑梯已经订阅成功时，调用方会 break，单曲梯根本不会被求值。
+
+        这里**只产出带媒体身份的条目**（豆瓣已确认的单曲/专辑）：没有身份时交给
+        宿主按标题识别，既不一定会命中，又会额外广播一轮 recognize_media，
+        所以统一收到调用方的「宿主兜底识别」（由 ``DEFAULT_HOST_FALLBACK``
+        开关控制，默认关闭）。
+
+        :return: ``(music_type, 订阅标题, media_source, media_id)`` 迭代器
         """
         scope = self._subscribe_scope
-        ladder: List[Tuple[str, str, Optional[Any], Optional[str]]] = []
-
-        def push_recording(source=None, media_id=None, display=None):
-            ladder.append((
-                "recording",
-                display or f"{artist} {title}".strip(),
-                source, media_id,
-            ))
-
-        def push_album(source=None, media_id=None, display=None):
-            name = display or album or title
-            if name:
-                ladder.append(("album", name, source, media_id))
-
         if scope != "recording":
-            # 专辑梯：优先用同步时拿到的真实专辑名走豆瓣识别
+            # 专辑梯：用同步时拿到的真实专辑名走豆瓣识别
             info = self._recognize_douban("album", title, artist, album)
             if info:
-                push_album(info[0], info[1], display=info[2])
-            else:
-                push_album()  # 交给宿主按专辑名识别（MusicBrainz release-group）
+                name = info[2] or album or title
+                if name:
+                    yield ("album", name, info[0], info[1])
         if scope != "album_only":
-            # 单曲梯：先豆瓣单曲识别，失败再交给宿主
+            # 单曲梯：豆瓣单曲识别
             info = self._recognize_douban("recording", title, artist, album)
             if info:
-                ladder.append((
+                yield (
                     "recording",
                     f"{artist} {title}".strip() if artist else title,
                     info[0], info[1],
-                ))
-            else:
-                push_recording()
-        return ladder
+                )
 
     def _recognize_douban(
         self,
@@ -3264,15 +3330,57 @@ class MusicSubscribe(_PluginBase):
         artist: str,
         album: str,
     ) -> Optional[Tuple[Any, str, str]]:
-        """用宿主内置的豆瓣音乐源识别单曲或专辑。
+        """用宿主内置的豆瓣音乐源识别单曲或专辑（同一轮内按参数缓存）。
 
         豆瓣对中文音乐的覆盖远好于 MusicBrainz，且返回结果自带媒体身份
         （media_source/media_id）与专辑曲目总数，是提高订阅成功率的关键。
+
+        缓存的意义不只是省一次请求：宿主识别链内部走
+        ``run_module("recognize_media")``，每次调用都会广播给**所有**声明该模块
+        方法的插件（含纯影视来源的插件），所以同一首歌重复识别等于反复惊动整条
+        插件链。缓存键为 ``(music_type, title, artist, album)``，同一轮同步内命中
+        即直接复用（含"识别失败"这个否定结果）。
 
         :return: ``(media_source, media_id, 订阅标题)``，识别失败返回 None
         """
         if not title:
             return None
+        cache = getattr(self, "_douban_cache", None)
+        if cache is None:
+            cache = self._douban_cache = {}
+        cache_key = (music_type, title, artist, album)
+        if cache_key in cache:
+            return cache[cache_key]
+        # 进程长期驻留，缓存要有界：按写入顺序淘汰最早的条目
+        while len(cache) >= self.DOUBAN_CACHE_LIMIT:
+            cache.pop(next(iter(cache)), None)
+        result = self._recognize_douban_uncached(music_type, title, artist, album)
+        cache[cache_key] = result
+        return result
+
+    @staticmethod
+    def _is_music_media_source(media_source: Any) -> bool:
+        """判断识别结果的来源是否属于音乐来源（宿主过旧时不做限制）。"""
+        try:
+            from app.sdk.media import is_music_media_source
+        except Exception:  # noqa: BLE001 - 旧宿主没有该判定，退化为不做限制
+            try:
+                from app.domain.media import is_music_media_source  # type: ignore
+            except Exception:  # noqa: BLE001
+                return True
+        try:
+            return bool(is_music_media_source(media_source))
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _recognize_douban_uncached(
+        self,
+        music_type: str,
+        title: str,
+        artist: str,
+        album: str,
+    ) -> Optional[Tuple[Any, str, str]]:
+        """真正执行一次豆瓣音乐识别（不做缓存）。"""
         try:
             from app.chain.douban import DoubanChain
             from app.domain.meta.metamusic import MetaMusic
@@ -3297,6 +3405,15 @@ class MusicSubscribe(_PluginBase):
         media_source = getattr(info, "media_source", None)
         media_id = getattr(info, "media_id", None)
         if not media_source or not media_id or str(media_id) in ("", "0"):
+            return None
+        # 宿主的识别是「插件优先」的模块广播：影视类插件若没校验 media_source
+        # 就按标题返回结果，会抢先命中（短路口）。只采信音乐来源，避免把影视
+        # 结果当成音乐订阅线索。
+        if not self._is_music_media_source(media_source):
+            logger.info(
+                f"豆瓣音乐识别[{music_type}·{title}]返回了非音乐来源"
+                f"（{media_source}），按未识别处理"
+            )
             return None
         if music_type == "album":
             # 宿主硬性要求专辑订阅带曲目总数，缺了必然被拒
