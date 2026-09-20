@@ -41,6 +41,14 @@ SUBSCRIBE_STATE_TEXT = {
     "S": "暂停",
 }
 
+#: 待处理曲目（库内缺失缓存）的校验状态文案。
+PENDING_VERIFY_TEXT = {
+    "": "未校验",
+    "ok": "已确认存在",
+    "not_found": "网易云未找到",
+    "error": "校验失败",
+}
+
 # --------------------------------------------------------------------------
 # 配置页按钮交互脚本。
 # Vuetify JSON 模式下 `on*` 事件的值是函数代码字符串，前端 FormRender 会在
@@ -196,16 +204,63 @@ async function (event) {
 }
 """
 
+# 待处理清单（库内缺失曲目）的三个动作脚本：校验 / 推送订阅 / 移除。
+# 三者只是接口后缀不同，用同一模板生成。
+JS_PENDING_ACTION = """
+async function (event) {
+  pending_loading = true;
+  try {
+    const ids = encodeURIComponent(pending_action_ids || '');
+    const resp = await window.MoviePilotAPI.post(
+      'plugin/MusicSubscribe/pending/%(action)s?ids=' + ids
+    );
+    let text = (resp && resp.message) || '操作完成';
+    if (resp && resp.data) {
+      if (resp.data.total !== undefined) {
+        text += '；当前清单 ' + resp.data.total + ' 条';
+      } else if (resp.data.removed !== undefined) {
+        text += '；共 ' + resp.data.removed + ' 条';
+      }
+    }
+    pending_msg = text;
+  } catch (err) {
+    pending_msg = '操作失败：' + ((err && err.message) || err);
+  } finally {
+    pending_loading = false;
+  }
+}
+"""
+JS_PENDING_VERIFY = JS_PENDING_ACTION % {'action': 'verify'}
+JS_PENDING_PUSH = JS_PENDING_ACTION % {'action': 'push'}
+JS_PENDING_REMOVE = JS_PENDING_ACTION % {'action': 'remove'}
+
+# 只清理「已推送完成」的条目，避免误删还未处理的缓存
+JS_PENDING_CLEAR = """
+async function (event) {
+  pending_loading = true;
+  try {
+    const resp = await window.MoviePilotAPI.post(
+      'plugin/MusicSubscribe/pending/clear?scope=pushed'
+    );
+    pending_msg = (resp && resp.message) || '清理完成';
+  } catch (err) {
+    pending_msg = '清理失败：' + ((err && err.message) || err);
+  } finally {
+    pending_loading = false;
+  }
+}
+"""
+
 
 class MusicSubscribe(_PluginBase):
     # 插件名称
     plugin_name = "歌单订阅"
     # 插件描述
-    plugin_desc = "把网易云/QQ/汽水音乐歌单与场景化听歌模式自动同步成 Plex/Emby 播放列表，库内没有的歌曲按单曲或所在专辑转为音乐订阅。"
+    plugin_desc = "把网易云/QQ/汽水音乐歌单与场景化听歌模式自动同步成 Plex/Emby 播放列表，库内没有的歌曲先缓存待处理，去网易云校验后可一键推送订阅。"
     # 插件图标
     plugin_icon = "music.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     # 插件作者
     plugin_author = "xheia"
     # 作者主页
@@ -230,6 +285,7 @@ class MusicSubscribe(_PluginBase):
         "login_msg", "login_loading",
         "probe_msg", "probe_loading",
         "diag_msg", "diag_loading",
+        "pending_msg", "pending_loading",
     )
     #: 插件数据中的键名：最近一次同步统计 / 本插件登记的音乐订阅
     SYNC_STATS_KEY = "sync_stats"
@@ -238,6 +294,25 @@ class MusicSubscribe(_PluginBase):
     SUBSCRIBE_RECORD_LIMIT = 500
     #: 一次性动作里属于文本输入的动作，执行完复位成空串而不是 False
     TEXT_ACTIONS = ("subscribe_remove_ids",)
+
+    # ------------------------------------------------------------------
+    # 库内缺失曲目：先落本地缓存 → 去 music.163.com 校验 → 手动推送订阅
+    # 说明：同步时媒体库里搜不到的歌曲不再无人值守地直接订阅，而是进本地
+    # 待处理清单；用户在界面上一键去网易云校验（确认歌曲真实存在并取回
+    # 准确的歌手/专辑），确认后再手动推送订阅。这样既不丢歌，也不产生
+    # 一堆必然失败的订阅。
+    # ------------------------------------------------------------------
+    #: 处理方式：缓存待处理（默认）/ 立即自动转订阅 / 不处理
+    MISSING_ACTIONS = (
+        ("cache", "缓存待处理：先存本地，校验后手动推送（推荐）"),
+        ("auto", "立即自动转为音乐订阅"),
+        ("off", "不处理：只在日志与详情页记录"),
+    )
+    DEFAULT_MISSING_ACTION = "cache"
+    #: 插件数据键名：库内缺失曲目的本地待处理清单
+    PENDING_KEY = "pending_tracks"
+    #: 待处理清单条数上限，超出后丢弃最早的条目
+    PENDING_LIMIT = 800
 
     # ------------------------------------------------------------------
     # 听歌模式：把网易云官方场景歌单自动同步成媒体库播放列表
@@ -300,6 +375,10 @@ class MusicSubscribe(_PluginBase):
     _listen_extra = ""
     # 订阅范围：库内缺歌转音乐订阅时的目标粒度
     _subscribe_scope = DEFAULT_SUBSCRIBE_SCOPE
+    # 库内缺失曲目的处理方式：cache / auto / off
+    _missing_action = DEFAULT_MISSING_ACTION
+    # 待处理清单操作对象：序号（逗号分隔，留空表示全部）
+    _pending_action_ids = ""
     # 订阅管理（保存配置时执行的一次性动作）
     _subscribe_remove_ids = ""
     _subscribe_clear_own = False
@@ -369,6 +448,12 @@ class MusicSubscribe(_PluginBase):
         self._wy_daily_song = bool(config.get("wy_daily_song"))
         # 库内没有的歌曲是否转为 MoviePilot 音乐订阅
         self._wy_subscribe = bool(config.get("wy_subscribe"))
+        # 库内缺失曲目的处理方式；旧配置没有该字段时按旧开关迁移
+        action = str(config.get("missing_action") or "").strip().lower()
+        if not any(action == item[0] for item in self.MISSING_ACTIONS):
+            action = "auto" if self._wy_subscribe else self.DEFAULT_MISSING_ACTION
+        self._missing_action = action
+        self._pending_action_ids = config.get("pending_action_ids") or ""
         # 订阅管理（保存即执行，执行后开关复位）
         self._subscribe_remove_ids = config.get("subscribe_remove_ids") or ""
         self._subscribe_clear_own = bool(config.get("subscribe_clear_own"))
@@ -550,6 +635,41 @@ class MusicSubscribe(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "批量清理音乐订阅（scope=own 本插件创建 / scope=unrecognized 未识别）",
+            },
+            {
+                "path": "/pending",
+                "endpoint": self.api_pending,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "查询库内缺失曲目的本地待处理清单",
+            },
+            {
+                "path": "/pending/verify",
+                "endpoint": self.api_pending_verify,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "去 music.163.com 校验待处理曲目（ids 留空表示全部）",
+            },
+            {
+                "path": "/pending/push",
+                "endpoint": self.api_pending_push,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "把选中的待处理曲目推送到音乐订阅（ids 留空表示全部）",
+            },
+            {
+                "path": "/pending/remove",
+                "endpoint": self.api_pending_remove,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "从待处理清单移除条目（ids 留空表示全部）",
+            },
+            {
+                "path": "/pending/clear",
+                "endpoint": self.api_pending_clear,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "清理待处理清单（scope=all 全部 / scope=pushed 仅已推送）",
             },
         ]
 
@@ -818,6 +938,98 @@ class MusicSubscribe(_PluginBase):
         }
 
     # ------------------------------------------------------------------
+    # 库内缺失曲目：待处理清单接口
+    # ------------------------------------------------------------------
+
+    def api_pending(self) -> Dict[str, Any]:
+        """返回本地待处理清单（含校验与推送状态）。"""
+        records = self._pending_records()
+        items: List[Dict[str, Any]] = []
+        for record in records:
+            item = dict(record)
+            item["verify_text"] = PENDING_VERIFY_TEXT.get(
+                str(item.get("verify_status") or ""), "未校验")
+            item["state_text"] = "已推送" if item.get("pushed") else "待推送"
+            items.append(item)
+        return {
+            "success": True,
+            "message": "",
+            "data": {
+                "total": len(items),
+                "pending": len([i for i in items if not i.get("pushed")]),
+                "verified": len([i for i in items if i.get("verify_status") == "ok"]),
+                "not_found": len([i for i in items if i.get("verify_status") == "not_found"]),
+                "pushed": len([i for i in items if i.get("pushed")]),
+                "items": items,
+            },
+        }
+
+    def api_pending_verify(
+        self, ids: Optional[str] = None, api_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """把选中的待处理曲目拿到 music.163.com 上校验。"""
+        records = self._match_pending(self._pending_records(), ids)
+        if not records:
+            return {"success": False, "message": "待处理清单为空，没有可校验的曲目", "data": {}}
+        client = self._make_client(api_url) if api_url else self._ensure_cloudmusic()
+        stats = self._verify_pending(records, cm=client)
+        message = (
+            f"校验完成：确认存在 {stats['ok']} 条，"
+            f"未找到 {stats['not_found']} 条，失败 {stats['error']} 条"
+        )
+        return {"success": True, "message": message, "data": stats}
+
+    def api_pending_push(self, ids: Optional[str] = None) -> Dict[str, Any]:
+        """把选中的待处理曲目推送到 MoviePilot 音乐订阅。"""
+        records = self._match_pending(self._pending_records(), ids)
+        if not records:
+            return {"success": False, "message": "待处理清单为空，没有可推送的曲目", "data": {}}
+        unverified = len([i for i in records if not i.get("verify_status")])
+        stats = self._push_pending(records)
+        message = f"推送完成：成功 {stats['pushed']} 条，未新增 {stats['exists']} 条"
+        if stats.get("skipped"):
+            message += f"，跳过已推送 {stats['skipped']} 条"
+        if unverified:
+            message += f"（其中 {unverified} 条尚未校验，按原始元数据推送）"
+        return {"success": True, "message": message, "data": stats}
+
+    def api_pending_remove(self, ids: Optional[str] = None) -> Dict[str, Any]:
+        """从待处理清单里移除条目。"""
+        records = self._match_pending(self._pending_records(), ids)
+        if not records:
+            return {"success": False, "message": "待处理清单为空，没有可移除的曲目", "data": {}}
+        removed = self._remove_pending(records)
+        return {
+            "success": True,
+            "message": f"已从待处理清单移除 {removed} 条",
+            "data": {"removed": removed},
+        }
+
+    def api_pending_clear(self, scope: str = "all") -> Dict[str, Any]:
+        """清理待处理清单。
+
+        :param scope: ``all`` 清空全部；``pushed`` 只清已推送完成的条目。
+        """
+        records = self._pending_records()
+        if scope == "all":
+            keep: List[Dict[str, Any]] = []
+        elif scope == "pushed":
+            keep = [item for item in records if not item.get("pushed")]
+        else:
+            return {
+                "success": False,
+                "message": f"不支持的清理范围：{scope}",
+                "data": {},
+            }
+        removed = len(records) - len(keep)
+        self._save_pending(keep)
+        return {
+            "success": True,
+            "message": f"已清理 {removed} 条待处理记录",
+            "data": {"removed": removed},
+        }
+
+    # ------------------------------------------------------------------
     # 订阅管理内部实现
     # ------------------------------------------------------------------
 
@@ -1006,9 +1218,22 @@ class MusicSubscribe(_PluginBase):
             {
                 'component': 'VRow',
                 'content': [
-                    self._col(4, self._switch('wy_daily_song', '同步每日推荐歌曲')),
-                    self._col(4, self._switch('wy_daily_list', '同步每日推荐歌单')),
-                    self._col(4, self._switch('wy_subscribe', '库内没有的歌曲转为音乐订阅')),
+                self._col(4, self._switch('wy_daily_song', '同步每日推荐歌曲')),
+                self._col(4, self._switch('wy_daily_list', '同步每日推荐歌单')),
+                self._col(4, {
+                    'component': 'VSelect',
+                    'props': {
+                        'model': 'missing_action',
+                        'label': '库内缺失曲目处理方式',
+                        'items': [
+                            {'title': item[1], 'value': item[0]}
+                            for item in self.MISSING_ACTIONS
+                        ],
+                        'hint': '推荐「缓存待处理」：不会自动订阅，'
+                                '先存本地，校验后再由你手动推送',
+                        'persistent-hint': True,
+                    },
+                }),
                 ],
             },
             {
@@ -1200,6 +1425,100 @@ class MusicSubscribe(_PluginBase):
                 ],
             },
             {
+                'component': 'VExpansionPanels',
+                'props': {'variant': 'accordion', 'multiple': True, 'class': 'mb-2'},
+                'content': [
+                    {
+                        'component': 'VExpansionPanel',
+                        'content': [
+                            {
+                                'component': 'VExpansionPanelTitle',
+                                'text': '库内缺失曲目：网易云校验 + 手动推送订阅',
+                            },
+                            {
+                                'component': 'VExpansionPanelText',
+                                'content': [
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'density': 'compact',
+                                            'class': 'mb-3',
+                                            'text': '同步时媒体库里搜不到的歌曲会先缓存到本地清单，'
+                                                    '不会自动订阅。在这里填写要处理的序号，'
+                                                    '先「校验」确认歌曲在 music.163.com 上真实存在'
+                                                    '并取回准确的歌手与专辑，再「推送订阅」。'
+                                                    '序号见插件详情页的待处理清单，留空表示全部。',
+                                        },
+                                    },
+                                    {
+                                        'component': 'VRow',
+                                        'content': [
+                                            self._col(6, {
+                                                'component': 'VTextField',
+                                                'props': {
+                                                    'model': 'pending_action_ids',
+                                                    'label': '要处理的条目序号（逗号分隔，留空=全部）',
+                                                    'placeholder': 'eg: 1,3,5',
+                                                    'clearable': True,
+                                                },
+                                            }),
+                                        ],
+                                    },
+                                    {
+                                        'component': 'VRow',
+                                        'content': [
+                                            self._col(3, self._button(
+                                                '校验（去网易云）', JS_PENDING_VERIFY,
+                                                color='info',
+                                                loading_model='pending_loading',
+                                            )),
+                                            self._col(3, self._button(
+                                                '推送订阅', JS_PENDING_PUSH,
+                                                color='success',
+                                                loading_model='pending_loading',
+                                            )),
+                                            self._col(3, self._button(
+                                                '移除选中', JS_PENDING_REMOVE,
+                                                color='warning',
+                                                loading_model='pending_loading',
+                                            )),
+                                            self._col(3, self._button(
+                                                '清理已推送', JS_PENDING_CLEAR,
+                                                color='default',
+                                                loading_model='pending_loading',
+                                            )),
+                                        ],
+                                    },
+                                    {
+                                        'component': 'VRow',
+                                        'props': {'show': '{{pending_msg}}'},
+                                        'content': [
+                                            {
+                                                'component': 'VCol',
+                                                'props': {'cols': 12},
+                                                'content': [
+                                                    {
+                                                        'component': 'VAlert',
+                                                        'props': {
+                                                            'type': 'info',
+                                                            'variant': 'tonal',
+                                                            'density': 'compact',
+                                                            'text': '{{pending_msg}}',
+                                                        },
+                                                    }
+                                                ],
+                                            }
+                                        ],
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+            {
                 'component': 'VRow',
                 'content': [
                     {
@@ -1323,6 +1642,8 @@ class MusicSubscribe(_PluginBase):
             "listen_presets": [],
             "listen_extra": "",
             "subscribe_scope": self.DEFAULT_SUBSCRIBE_SCOPE,
+            "missing_action": self.DEFAULT_MISSING_ACTION,
+            "pending_action_ids": "",
             "wy_logout": False,
             "subscribe_remove_ids": "",
             "subscribe_clear_own": False,
@@ -1337,6 +1658,8 @@ class MusicSubscribe(_PluginBase):
             "probe_loading": False,
             "diag_msg": "",
             "diag_loading": False,
+            "pending_msg": "",
+            "pending_loading": False,
         }
 
     def get_page(self) -> Optional[List[dict]]:
@@ -1519,7 +1842,65 @@ class MusicSubscribe(_PluginBase):
             "同步时库里搜不到的歌曲会登记到这里。",
         ))
 
-        # ---------------- 5. 管理入口说明 ----------------
+        # ---------------- 5. 待处理清单（库内缺失缓存） ----------------
+        pending_items = self._pending_records()
+        waiting = [item for item in pending_items if not item.get("pushed")]
+        content.append({
+            "component": "VSheet",
+            "props": {
+                "color": "transparent",
+                "class": "d-flex flex-wrap align-center ga-2 px-4 py-2",
+            },
+            "content": [
+                self._chip(f"待处理 {len(pending_items)}", "primary"),
+                self._chip(f"待推送 {len(waiting)}",
+                           "warning" if waiting else "default"),
+                self._chip(
+                    f"已确认 {len([i for i in pending_items if i.get('verify_status') == 'ok'])}",
+                    "success"),
+                self._chip(
+                    f"已推送 {len([i for i in pending_items if i.get('pushed')])}",
+                    "info"),
+            ],
+        })
+        pending_rows: List[Dict[str, Any]] = []
+        for item in pending_items:
+            matched = ""
+            if item.get("matched_title"):
+                matched = f"{item.get('matched_title')}"
+                if item.get("matched_artist"):
+                    matched += f" - {item.get('matched_artist')}"
+            pending_rows.append({
+                "seq": item.get("seq") or "",
+                "title": item.get("title") or "",
+                "artist": item.get("artist") or "",
+                "album": item.get("album") or "",
+                "source": item.get("source") or "",
+                "hits": item.get("hits") or 1,
+                "verify_text": PENDING_VERIFY_TEXT.get(
+                    str(item.get("verify_status") or ""), "未校验"),
+                "matched": matched,
+                "state_text": "已推送" if item.get("pushed") else "待推送",
+            })
+        content.append(self._page_table(
+            "待处理清单（库内缺失缓存 → 网易云校验 → 手动推送）",
+            [
+                {"title": "序号", "key": "seq"},
+                {"title": "歌曲", "key": "title"},
+                {"title": "歌手", "key": "artist"},
+                {"title": "专辑", "key": "album"},
+                {"title": "来源", "key": "source"},
+                {"title": "命中", "key": "hits"},
+                {"title": "校验结果", "key": "verify_text"},
+                {"title": "网易云匹配", "key": "matched"},
+                {"title": "状态", "key": "state_text"},
+            ],
+            pending_rows,
+            "还没有待处理曲目。同步时媒体库里搜不到的歌曲会先缓存到这里，"
+            "再由你在配置页校验并手动推送订阅。",
+        ))
+
+        # ---------------- 6. 管理入口说明 ----------------
         content.append({
             "component": "VAlert",
             "props": {
@@ -1528,6 +1909,7 @@ class MusicSubscribe(_PluginBase):
                 "title": "订阅管理",
                 "text": "删除订阅请到「配置页 → 音乐订阅管理」：可清理本插件创建的全部订阅、"
                         "清理未识别的脏数据，或按上面表格里的订阅 ID 精确删除。"
+                        "待处理清单的校验与推送在「配置页 → 库内缺失曲目」里操作。"
                         "也可以直接调接口："
                         "/api/v1/plugin/MusicSubscribe/subscribes/remove?ids=1,2",
             },
@@ -2440,6 +2822,277 @@ class MusicSubscribe(_PluginBase):
 
     _QISHUI_LINK_RE = re.compile(r"https?://[^\s:：]+")
 
+    # ------------------------------------------------------------------
+    # 库内缺失曲目：本地缓存 → 网易云校验 → 手动推送订阅
+    # ------------------------------------------------------------------
+
+    def _pending_records(self) -> List[Dict[str, Any]]:
+        """读取本地待处理清单（同步时判定为库内缺失的曲目）。"""
+        records = self.get_data(self.PENDING_KEY)
+        if not isinstance(records, list):
+            return []
+        return [item for item in records if isinstance(item, dict)]
+
+    def _save_pending(self, records: List[Dict[str, Any]]) -> None:
+        """写回待处理清单，并按上限裁剪（保留最新的部分）。"""
+        if len(records) > self.PENDING_LIMIT:
+            records = records[-self.PENDING_LIMIT:]
+        self.save_data(self.PENDING_KEY, records)
+
+    @staticmethod
+    def _pending_key(title: str, artist: str = "") -> str:
+        """去重键：同一首歌被多个歌单判定为缺失时只保留一条。"""
+        return f"{artist} {title}".strip().lower()
+
+    @staticmethod
+    def _next_pending_seq(records: List[Dict[str, Any]]) -> int:
+        """清单序号只增不减，保证界面上的编号稳定可引用。"""
+        seq = 0
+        for item in records:
+            try:
+                seq = max(seq, int(item.get("seq") or 0))
+            except (TypeError, ValueError):
+                continue
+        return seq + 1
+
+    def _cache_missing_tracks(
+        self,
+        t_tracks: List[Any],
+        missing_titles: List[str],
+        source: str = "",
+        server: str = "",
+        playlist: str = "",
+    ) -> int:
+        """把库里缺失的曲目写进本地待处理清单。
+
+        已存在的条目只累加命中次数与更新时间，不重复占位。
+        :return: 本次新增条目数
+        """
+        if not missing_titles:
+            return 0
+        records = self._pending_records()
+        index = {item.get("key"): item for item in records}
+        now = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d %H:%M:%S")
+        # 标题 -> (第一位歌手, 专辑名)
+        meta: Dict[str, Tuple[str, str]] = {}
+        for track in t_tracks or []:
+            if not track or track[0] in meta:
+                continue
+            artists = track[1] if len(track) > 1 and track[1] else []
+            album = track[2] if len(track) > 2 and track[2] else ""
+            meta[track[0]] = (artists[0] if artists else "", album)
+        seq = self._next_pending_seq(records)
+        added = 0
+        for title in missing_titles:
+            if not title:
+                continue
+            artist, album = meta.get(title, ("", ""))
+            key = self._pending_key(title, artist)
+            exist = index.get(key)
+            if exist:
+                exist["hits"] = int(exist.get("hits") or 1) + 1
+                exist["last_time"] = now
+                continue
+            record = {
+                "seq": seq,
+                "key": key,
+                "title": title,
+                "artist": artist,
+                "album": album,
+                "source": source,
+                "server": server,
+                "playlist": playlist,
+                "hits": 1,
+                "first_time": now,
+                "last_time": now,
+                "verify_status": "",
+                "verify_time": "",
+                "verify_message": "",
+                "song_id": 0,
+                "matched_title": "",
+                "matched_artist": "",
+                "matched_album": "",
+                "pushed": False,
+                "subscribe_id": 0,
+                "push_time": "",
+                "push_message": "",
+            }
+            records.append(record)
+            index[key] = record
+            seq += 1
+            added += 1
+        self._save_pending(records)
+        return added
+
+    def _apply_pending_update(self, updates: List[Dict[str, Any]]) -> None:
+        """把对子集的改动按 key 合并回全量清单后落盘。
+
+        宿主 ``get_data`` 返回的是新对象，所以子集改动必须显式回写，
+        不能依赖对象引用。
+        """
+        records = self._pending_records()
+        index = {item.get("key"): item for item in records}
+        for item in updates or []:
+            target = index.get(item.get("key"))
+            if target is None:
+                continue
+            target.update(item)
+        self._save_pending(records)
+
+    @staticmethod
+    def _match_pending(
+        records: List[Dict[str, Any]], ids_text: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """按用户填写的序号挑选条目；留空或填 all 表示全部。"""
+        text = str(ids_text or "").strip()
+        if not text or text.lower() in ("all", "*"):
+            return list(records)
+        wanted = set()
+        for chunk in re.split(r"[,，、\s]+", text):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            try:
+                wanted.add(int(chunk))
+            except ValueError:
+                continue
+        if not wanted:
+            return list(records)
+        return [
+            item for item in records
+            if int(item.get("seq") or 0) in wanted
+        ]
+
+    def _ensure_cloudmusic(self) -> CloudMusic:
+        """取网易云客户端（同步流程之外调用时按需创建）。"""
+        if self.cm is None:
+            self.cm = CloudMusic(
+                base_url=self._ncm_api_url,
+                data_path=self.get_data_path(),
+            )
+        return self.cm
+
+    def _verify_pending(
+        self,
+        records: List[Dict[str, Any]],
+        cm: Optional[CloudMusic] = None,
+    ) -> Dict[str, int]:
+        """逐条去 music.163.com 校验，并回填权威的歌手/专辑。
+
+        :param cm: 指定客户端（配置页允许用表单里正在编辑的服务地址）
+        :return: ``{ok, not_found, error}`` 计数
+        """
+        stats = {"ok": 0, "not_found": 0, "error": 0}
+        if not records:
+            return stats
+        cm = cm or self._ensure_cloudmusic()
+        now = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d %H:%M:%S")
+        for record in records:
+            result = cm.verify_track(
+                record.get("title") or "",
+                record.get("artist") or "",
+                record.get("album") or "",
+            )
+            status = str(result.get("status") or "error")
+            stats[status] = stats.get(status, 0) + 1
+            record["verify_status"] = status
+            record["verify_time"] = now
+            record["verify_message"] = result.get("message") or ""
+            record["song_id"] = result.get("song_id") or 0
+            record["matched_title"] = result.get("title") or ""
+            record["matched_artist"] = result.get("artist") or ""
+            record["matched_album"] = result.get("album") or ""
+            logger.info(
+                f"曲目校验[{record.get('title')}]：{status}"
+                f"（{record['verify_message']}）"
+            )
+        self._apply_pending_update(records)
+        return stats
+
+    def _push_pending(self, records: List[Dict[str, Any]]) -> Dict[str, int]:
+        """把选中的待处理曲目推送到 MoviePilot 音乐订阅。
+
+        校验拿到的专辑名会优先作为订阅线索，订阅成功率比只给歌名高。
+        :return: ``{pushed, exists, failed, skipped}`` 计数
+        """
+        targets = [item for item in records if not item.get("pushed")]
+        stats = {
+            "pushed": 0,
+            "exists": 0,
+            "failed": 0,
+            "skipped": len(records) - len(targets),
+        }
+        if not targets:
+            return stats
+        t_tracks = []
+        for record in targets:
+            artist = record.get("matched_artist") or record.get("artist") or ""
+            album = record.get("matched_album") or record.get("album") or ""
+            t_tracks.append([
+                record.get("title") or "",
+                [artist] if artist else [],
+                album,
+            ])
+        before = len(list((self._sub_report or {}).get("items") or []))
+        self._add_music_subscribes(t_tracks, [item.get("title") for item in targets])
+        new_items = list((self._sub_report or {}).get("items") or [])[before:]
+        by_title: Dict[str, Dict[str, Any]] = {}
+        for item in new_items:
+            by_title.setdefault(str(item.get("title") or ""), item)
+        now = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d %H:%M:%S")
+        for record in targets:
+            matched = by_title.get(str(record.get("title") or ""))
+            if matched:
+                record["pushed"] = True
+                record["subscribe_id"] = matched.get("id") or 0
+                record["push_time"] = now
+                record["push_message"] = f"已订阅：{matched.get('keyword') or ''}"
+                stats["pushed"] += 1
+            else:
+                record["push_message"] = "未新增（已存在或未识别），可稍后重试"
+                stats["exists"] += 1
+            record["pushed_at"] = now
+        report = self._sub_report or {}
+        stats["failed"] = int(report.get("failed") or 0)
+        self._apply_pending_update(targets)
+        return stats
+
+    def _remove_pending(self, records: List[Dict[str, Any]]) -> int:
+        """从待处理清单里删掉选中条目。"""
+        keys = {item.get("key") for item in records or []}
+        if not keys:
+            return 0
+        all_records = self._pending_records()
+        kept = [item for item in all_records if item.get("key") not in keys]
+        removed = len(all_records) - len(kept)
+        self._save_pending(kept)
+        return removed
+
+    def _handle_missing_tracks(
+        self,
+        t_tracks: List[Any],
+        missing_titles: List[str],
+        source: str = "",
+        server: str = "",
+        playlist: str = "",
+    ) -> None:
+        """按配置的处理方式分派库内缺失曲目。"""
+        titles = [title for title in (missing_titles or []) if title]
+        if not titles:
+            return
+        action = self._missing_action
+        if action == "off":
+            logger.info(f"库内缺失 {len(titles)} 首，已按配置「不处理」跳过")
+            return
+        if action == "auto":
+            self._add_music_subscribes(t_tracks, titles)
+            return
+        added = self._cache_missing_tracks(t_tracks, titles, source, server, playlist)
+        logger.info(
+            f"库内缺失 {len(titles)} 首已缓存到本地待处理清单（新增 {added} 条）："
+            f"{titles[:10]}；可在配置页一键去网易云校验，再手动推送订阅"
+        )
+
     def _add_music_subscribes(self, t_tracks, missing_titles) -> None:
         """把同步时在媒体库里没搜到的歌曲转为 MoviePilot 音乐订阅。
 
@@ -2454,8 +3107,12 @@ class MusicSubscribe(_PluginBase):
         订阅粒度由「订阅范围」配置决定：仅单曲 / 单曲优先失败转所在专辑
         （推荐）/ 仅订阅所在专辑。结果累计进 ``self._sub_report`` 并登记
         订阅 id 供详情页做订阅管理。
+
+        本方法只负责订阅本身，是否调用由 ``_handle_missing_tracks`` 按
+        「库内缺失曲目的处理方式」决定（缓存待处理 / 自动订阅 / 不处理），
+        配置页的「手动推送订阅」也直接复用本方法。
         """
-        if not missing_titles or not self._wy_subscribe:
+        if not missing_titles:
             return
         try:
             from app.chain.subscribe import SubscribeChain
@@ -2795,7 +3452,8 @@ class MusicSubscribe(_PluginBase):
                 em.create_playlist(media_playlist, ','.join(tracks))
             _, final_ids, final_names = em.get_tracks_by_playlist(media_playlist)
             missing = [i[0] for i in t_tracks if i[0] not in set(final_names or [])]
-            self._add_music_subscribes(t_tracks, missing)
+            self._handle_missing_tracks(
+                t_tracks, missing, source, server_name, media_playlist)
             for user in other_users:
                 em.user = em.get_user(user)
                 em.get_music_library()

@@ -231,6 +231,26 @@ class NcmApiClient:
         """每日推荐歌曲，返回体里 ``data.dailySongs`` 即歌曲列表。"""
         return self.request("/recommend/songs")
 
+    def search_songs(self, keyword: str, limit: int = 10) -> Dict[str, Any]:
+        """搜索曲目，返回体里 ``result.songs`` 即候选列表。
+
+        用于「库内缺失曲目 → 网易云校验」：确认歌曲在 music.163.com 上真实
+        存在，并取回准确的歌名 / 歌手 / 专辑，作为后续音乐订阅的识别线索。
+
+        新版 ``/cloudsearch`` 与旧版 ``/search`` 返回结构一致，先走新版，
+        接口不存在时自动回退，兼容不同版本的 ncm-api。
+        """
+        params = {
+            "keywords": keyword,
+            "limit": max(1, int(limit or 1)),
+            "type": 1,
+            "offset": 0,
+        }
+        try:
+            return self.request("/cloudsearch", params)
+        except NcmApiError:
+            return self.request("/search", params)
+
     def daily_signin(self) -> Dict[str, Any]:
         """网易云签到。"""
         return self.request("/daily_signin", method="POST")

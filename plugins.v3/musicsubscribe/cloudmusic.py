@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -437,3 +438,132 @@ class CloudMusic:
         album_raw = raw.get("al") or raw.get("album") or {}
         album = sub_str(album_raw.get("name")) if isinstance(album_raw, dict) else ""
         return [name, [singer for singer in singers if singer], album or ""]
+
+    # ------------------------------------------------------------------
+    # 曲目校验（库内缺失的歌曲去 music.163.com 确认真身）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def norm_text(text: Any) -> str:
+        """把歌名/歌手/专辑名归一化，用于比对。
+
+        去掉括号补充说明、各类标点与空白并统一小写，这样
+        「雨蝶 (Live)」「雨蝶【现场版】」「雨蝶」会被视为同一首。
+        """
+        value = sub_str(text) or ""
+        value = re.sub(r"[（(\[【].*?[)）\]】]", "", value)
+        value = re.sub(r"[\s\-_·,，.。!！?？:：;；'\"“”‘’/\\|]+", "", value)
+        return value.lower()
+
+    def search_track(
+        self, title: str, artist: str = "", limit: int = 8,
+    ) -> List[Dict[str, Any]]:
+        """在网易云搜索曲目，返回候选列表（含打分）。
+
+        候选结构：``{song_id, title, artist, album, score}``，
+        按匹配度降序排列。
+        """
+        title = sub_str(title)
+        artist = sub_str(artist)
+        if not title:
+            return []
+        keyword = f"{artist} {title}".strip()
+        result = self.api.search_songs(keyword, limit=limit)
+        songs = (result.get("result") or {}).get("songs") or []
+        candidates: List[Dict[str, Any]] = []
+        norm_title = self.norm_text(title)
+        norm_artist = self.norm_text(artist)
+        for raw in songs:
+            if not isinstance(raw, dict):
+                continue
+            track = self._to_track(raw)
+            cand_title = track[0]
+            cand_artists = track[1] or []
+            cand_album = track[2] if len(track) > 2 else ""
+            candidates.append({
+                "song_id": raw.get("id") or 0,
+                "title": cand_title,
+                "artist": "、".join(cand_artists),
+                "album": cand_album,
+                "score": self.match_score(
+                    norm_title, norm_artist, cand_title, cand_artists,
+                ),
+            })
+        candidates.sort(key=lambda item: item["score"], reverse=True)
+        return candidates
+
+    @staticmethod
+    def match_score(
+        norm_title: str, norm_artist: str,
+        cand_title: str, cand_artists: List[str],
+    ) -> int:
+        """给一个候选曲目打匹配分：标题权重最高，其次歌手。"""
+        score = 0
+        cand_norm_title = CloudMusic.norm_text(cand_title)
+        if norm_title and cand_norm_title:
+            if norm_title == cand_norm_title:
+                score += 3
+            elif norm_title in cand_norm_title or cand_norm_title in norm_title:
+                score += 1
+        if norm_artist:
+            for name in cand_artists or []:
+                cand_norm_artist = CloudMusic.norm_text(name)
+                if not cand_norm_artist:
+                    continue
+                if norm_artist == cand_norm_artist:
+                    score += 2
+                    break
+                if norm_artist in cand_norm_artist or cand_norm_artist in norm_artist:
+                    score += 1
+        return score
+
+    #: 校验通过所需的最低匹配分：标题完全一致即视为命中。
+    VERIFY_SCORE_THRESHOLD = 3
+
+    def verify_track(
+        self, title: str, artist: str = "", album: str = "",
+    ) -> Dict[str, Any]:
+        """到 music.163.com 校验一首歌是否存在，并回填权威元数据。
+
+        :return: ``{status, song_id, title, artist, album, score,
+                  candidates, message}``；``status`` 取 ``ok`` /
+                  ``not_found`` / ``error``，本方法不抛异常。
+        """
+        result: Dict[str, Any] = {
+            "status": "error",
+            "song_id": 0,
+            "title": "",
+            "artist": "",
+            "album": "",
+            "score": 0,
+            "candidates": 0,
+            "message": "",
+        }
+        try:
+            candidates = self.search_track(title, artist)
+        except Exception as error:  # noqa: BLE001 - 校验失败不影响同步
+            result["message"] = str(error)
+            return result
+        result["candidates"] = len(candidates)
+        if not candidates:
+            result["status"] = "not_found"
+            result["message"] = "网易云搜索无结果"
+            return result
+        best = candidates[0]
+        result.update({
+            "song_id": best.get("song_id") or 0,
+            "title": best.get("title") or "",
+            "artist": best.get("artist") or "",
+            "album": best.get("album") or "",
+            "score": best.get("score") or 0,
+        })
+        if (best.get("score") or 0) >= self.VERIFY_SCORE_THRESHOLD:
+            result["status"] = "ok"
+            result["message"] = f"匹配度 {best['score']}（候选 {len(candidates)} 条）"
+        else:
+            result["status"] = "not_found"
+            result["message"] = (
+                f"匹配度不足（最高 {best.get('score') or 0}，"
+                f"候选 {len(candidates)} 条）"
+            )
+        return result
