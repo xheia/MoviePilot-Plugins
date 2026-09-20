@@ -78,7 +78,10 @@ class QishuiClient:
 
     @staticmethod
     def _normalize_tracks(raw_tracks: List[Dict[str, Any]]) -> List[List[Any]]:
-        """把解析结果转成与网易云一致的 ``[歌名, [歌手, ...]]`` 结构。"""
+        """把解析结果转成 ``[歌名, [歌手, ...], 专辑名]`` 结构（专辑名可为空串）。
+
+        与网易云保持同一曲目结构，便于订阅阶段直接使用「歌曲所在专辑」。
+        """
         tracks: List[List[Any]] = []
         for item in raw_tracks:
             title = (item.get("title") or "").strip()
@@ -89,5 +92,6 @@ class QishuiClient:
                 for a in (item.get("artists") or [])
                 if isinstance(a, str) and a.strip()
             ]
-            tracks.append([title, artists])
+            album = (item.get("album") or "").strip() if isinstance(item.get("album"), str) else ""
+            tracks.append([title, artists, album])
         return tracks

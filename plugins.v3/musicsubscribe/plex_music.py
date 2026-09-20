@@ -145,12 +145,13 @@ class PlexMusic(Plex):
     def search_music(self, name_singer: List[Any], exact_match: bool = True) -> List[Any]:
         """通过歌曲名在音乐库中搜索，返回唯一一条用于入库的音频条目。
 
-        :param name_singer: ``[歌名, [歌手, ...]]``
+        :param name_singer: ``[歌名, [歌手, ...], 专辑名(可选)]``
         :param exact_match: 是否要求歌手也匹配
         :return: 命中的音频条目列表（0 或 1 条）
         """
         name = name_singer[0] if name_singer else None
         singers = (name_singer[1] if len(name_singer) > 1 else None) or []
+        album = (name_singer[2] if len(name_singer) > 2 else None) or ""
         if not name:
             return []
 
@@ -163,8 +164,35 @@ class PlexMusic(Plex):
             if not candidates:
                 return []
 
+        # 同名曲目在库里常属于不同专辑，能拿到专辑名时优先取同专辑的版本
+        if album:
+            same_album = [item for item in candidates if self._match_album(item, album)]
+            candidates = same_album or candidates
+
         # 同一首歌在库里可能有多个版本（如 FLAC 与 128K），取码率最高的一条
         return [self._best_bitrate(candidates)]
+
+    @staticmethod
+    def _match_album(item: Any, album: str) -> bool:
+        """判断音频条目所属专辑是否命中目标专辑名。"""
+        if not album:
+            return False
+        values = [
+            getattr(item, "albumTitle", None),
+            getattr(item, "parentTitle", None),
+        ]
+        normalized = [
+            MusicMediaServerHelper.normalize_name(value)
+            for value in values
+            if value
+        ]
+        normalized = [value for value in normalized if value]
+        if not normalized:
+            return False
+        target = MusicMediaServerHelper.normalize_name(album)
+        if not target:
+            return False
+        return any(target == value or target in value for value in normalized)
 
     def _search_tracks(self, name: str) -> List[Any]:
         """在音乐媒体库中按曲名检索音频条目。"""

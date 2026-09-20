@@ -307,6 +307,34 @@ class CloudMusic:
             )
         return [self._to_track(song) for song in daily_songs]
 
+    def get_category_playlists(self, cat: str, nums: int = 1, limit: int = 6) -> List[List[Any]]:
+        """按网易云官方歌单分类取热门歌单，返回 ``[[歌单id, 歌单名], ...]``。
+
+        「听歌模式」的数据源：清晨 / 轻音乐 / 学习 / 运动等场景分类由
+        网易云官方与达人不定期更新，插件每天自动取榜首歌单同步，
+        内容跟随官方刷新，无需人工维护。
+        接口失败或返回空列表时抛 :class:`NcmApiError`。
+        """
+        cat = (cat or "").strip()
+        if not cat:
+            raise NcmApiError("获取场景歌单失败：分类名为空")
+        result = self.api.top_playlists(cat, limit=limit)
+        self._check_result(result, f"获取场景歌单[{cat}]")
+        playlists = result.get("playlists") or []
+        if not playlists:
+            raise NcmApiError(
+                f"获取场景歌单[{cat}]失败：网易云该分类下没有返回歌单"
+                "（请确认分类名是否为网易云官方分类，或在「自定义场景」里改写）"
+            )
+        picked = [
+            [item.get("id"), item.get("name")]
+            for item in playlists[:max(1, int(nums or 1))]
+            if item.get("id")
+        ]
+        if not picked:
+            raise NcmApiError(f"获取场景歌单[{cat}]失败：返回结果里没有有效歌单 id")
+        return picked
+
     def diagnose_recommend(self) -> Dict[str, Any]:
         """探测每日推荐的两个接口，返回可读结果，供配置页与日志排错。
 
@@ -397,9 +425,15 @@ class CloudMusic:
 
     @staticmethod
     def _to_track(raw: Dict[str, Any]) -> List[Any]:
-        """把 ncm-api 的歌曲对象转换成 ``[歌名, [歌手, ...]]``。"""
+        """把 ncm-api 的歌曲对象转换成 ``[歌名, [歌手, ...], 专辑名]``。
+
+        专辑名可能为空串（老版本 ncm-api 不返回 al 字段时），下游所有
+        消费方都按「第三个元素可选」处理，不影响旧逻辑。
+        """
         name = sub_str(raw.get("name"))
         # 新版接口用 ar，老接口用 artists，两者都兼容
         artists = raw.get("ar") or raw.get("artists") or []
         singers = [change_str(artist.get("name")) for artist in artists]
-        return [name, [singer for singer in singers if singer]]
+        album_raw = raw.get("al") or raw.get("album") or {}
+        album = sub_str(album_raw.get("name")) if isinstance(album_raw, dict) else ""
+        return [name, [singer for singer in singers if singer], album or ""]

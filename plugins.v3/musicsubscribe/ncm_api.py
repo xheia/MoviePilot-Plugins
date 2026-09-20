@@ -212,6 +212,17 @@ class NcmApiClient:
             {"id": str(playlist_id), "limit": limit},
         )
 
+    def top_playlists(self, cat: str, limit: int = 5, order: str = "hot") -> Dict[str, Any]:
+        """按网易云官方歌单分类取热门歌单，返回体里 ``playlists`` 即歌单列表。
+
+        场景类分类（清晨、夜晚、学习、运动、轻音乐、通勤等）由网易云官方
+        与达人不定期更新，是「听歌模式」零维护取数的数据源。
+        """
+        return self.request(
+            "/top/playlist",
+            {"cat": cat, "limit": max(1, int(limit or 1)), "order": order},
+        )
+
     def recommend_playlists(self) -> Dict[str, Any]:
         """每日推荐歌单，返回体里 ``recommend`` 即歌单列表。"""
         return self.request("/recommend/resource")

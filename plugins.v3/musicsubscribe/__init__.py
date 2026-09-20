@@ -201,11 +201,11 @@ class MusicSubscribe(_PluginBase):
     # 插件名称
     plugin_name = "歌单订阅"
     # 插件描述
-    plugin_desc = "歌单订阅：同步QQ&网易云&汽水音乐歌单到plex&emby，库内没有的歌曲可转为音乐订阅。"
+    plugin_desc = "把网易云/QQ/汽水音乐歌单与场景化听歌模式自动同步成 Plex/Emby 播放列表，库内没有的歌曲按单曲或所在专辑转为音乐订阅。"
     # 插件图标
     plugin_icon = "music.png"
     # 插件版本
-    plugin_version = "8.3.0"
+    plugin_version = "1.0.0"
     # 插件作者
     plugin_author = "逗猫"
     # 作者主页
@@ -239,6 +239,33 @@ class MusicSubscribe(_PluginBase):
     #: 一次性动作里属于文本输入的动作，执行完复位成空串而不是 False
     TEXT_ACTIONS = ("subscribe_remove_ids",)
 
+    # ------------------------------------------------------------------
+    # 听歌模式：把网易云官方场景歌单自动同步成媒体库播放列表
+    # 说明：汽水音乐的场景电台（早晨音乐、纯音乐精选等）没有公开接口，
+    # PlaylistOut 解析服务也只支持 playlist/user 两种类型；但网易云的
+    # 官方场景歌单覆盖同样的需求且每日更新，插件已接入 ncm-api，
+    # 因此「听歌模式」用网易云场景分类实现，真正做到零人工维护。
+    # ------------------------------------------------------------------
+    #: 预设：键 -> (显示名, 网易云官方分类)
+    LISTEN_PRESETS = (
+        ("morning", "早晨音乐", "清晨"),
+        ("instrumental", "纯音乐精选", "轻音乐"),
+        ("study", "学习专注", "学习"),
+        ("workout", "运动节奏", "运动"),
+        ("night", "睡前放松", "夜晚"),
+        ("commute", "通勤路上", "通勤"),
+    )
+    #: 每个场景分类取热门榜前几名的第 1 个歌单（网易云按热度排序）
+    LISTEN_PICK_INDEX = 0
+    #: 订阅范围：单曲 / 优先单曲失败转所在专辑（推荐）/ 仅专辑
+    SUBSCRIBE_SCOPES = (
+        ("recording", "仅单曲"),
+        ("album_first", "单曲优先，失败转所在专辑（推荐）"),
+        ("album_only", "仅订阅所在专辑"),
+    )
+    #: 专辑订阅宿主要求 total_tracks 已知，识别结果缺该字段时放弃该途径
+    DEFAULT_SUBSCRIBE_SCOPE = "album_first"
+
     # 私有属性
     _scheduler: Optional[BackgroundScheduler] = None
     # 启动
@@ -268,6 +295,11 @@ class MusicSubscribe(_PluginBase):
     _wymusic_paths = ""
     _qqmusic_paths = ""
     _qishui_paths = ""
+    # 听歌模式：选中的预设键 + 自定义场景（每行"网易云分类:播放列表名"）
+    _listen_presets: List[str] = []
+    _listen_extra = ""
+    # 订阅范围：库内缺歌转音乐订阅时的目标粒度
+    _subscribe_scope = DEFAULT_SUBSCRIBE_SCOPE
     # 订阅管理（保存配置时执行的一次性动作）
     _subscribe_remove_ids = ""
     _subscribe_clear_own = False
@@ -323,6 +355,16 @@ class MusicSubscribe(_PluginBase):
         self._wymusic_paths = config.get("wymusic_paths") or ""
         self._qqmusic_paths = config.get("qqmusic_paths") or ""
         self._qishui_paths = config.get("qishui_paths") or ""
+        self._listen_presets = [
+            key for key in (config.get("listen_presets") or [])
+            if any(key == item[0] for item in self.LISTEN_PRESETS)
+        ]
+        self._listen_extra = config.get("listen_extra") or ""
+        scope = config.get("subscribe_scope") or self.DEFAULT_SUBSCRIBE_SCOPE
+        self._subscribe_scope = (
+            scope if any(scope == item[0] for item in self.SUBSCRIBE_SCOPES)
+            else self.DEFAULT_SUBSCRIBE_SCOPE
+        )
         self._wy_daily_list = bool(config.get("wy_daily_list"))
         self._wy_daily_song = bool(config.get("wy_daily_song"))
         # 库内没有的歌曲是否转为 MoviePilot 音乐订阅
@@ -1107,6 +1149,89 @@ class MusicSubscribe(_PluginBase):
                                 'props': {
                                     'type': 'info',
                                     'variant': 'tonal',
+                                    'title': '听歌模式：场景化歌单，零人工维护',
+                                    'text':
+                                        '选择预设场景（早晨音乐、纯音乐精选等）后，插件每天自动取 '
+                                        '网易云该分类的热门歌单，同步成与场景同名的媒体库播放列表，'
+                                        '内容跟随官方更新，无需再手工找歌单、贴链接。\n'
+                                        '汽水音乐的场景电台没有公开接口（解析服务只支持歌单/用户主页），'
+                                        '因此听歌模式使用网易云场景分类实现；汽水歌单仍可在下方'
+                                        '「汽水音乐歌单同步设置」里用分享链接同步。',
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    self._col(6, {
+                        'component': 'VSelect',
+                        'props': {
+                            'model': 'listen_presets',
+                            'label': '听歌模式预设（可多选）',
+                            'items': [
+                                {'title': item[1], 'value': item[0]}
+                                for item in self.LISTEN_PRESETS
+                            ],
+                            'multiple': True,
+                            'chips': True,
+                            'closable-chips': True,
+                            'clearable': True,
+                            'hint': '每天自动同步该场景的网易云热门歌单',
+                            'persistent-hint': True,
+                        },
+                    }),
+                    self._col(6, {
+                        'component': 'VSelect',
+                        'props': {
+                            'model': 'subscribe_scope',
+                            'label': '缺歌转订阅的粒度',
+                            'items': [
+                                {'title': item[1], 'value': item[0]}
+                                for item in self.SUBSCRIBE_SCOPES
+                            ],
+                            'hint': '按歌曲所在专辑订阅更容易被识别命中，'
+                                    '且一张专辑到齐即整单完成',
+                            'persistent-hint': True,
+                        },
+                    }),
+                ],
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12},
+                        'content': [
+                            {
+                                'component': 'VTextField',
+                                'props': {
+                                    'model': 'listen_extra',
+                                    'label': '自定义听歌场景（可选，用网易云官方分类名）',
+                                    'placeholder': 'eg: 车载:通勤路上 \neg: 古风 \n'
+                                                   '格式：网易云分类:播放列表名（省略名称时直接用分类名）',
+                                    'clearable': True,
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                'component': 'VRow',
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 12},
+                        'content': [
+                            {
+                                'component': 'VAlert',
+                                'props': {
+                                    'type': 'info',
+                                    'variant': 'tonal',
                                     'title': '使用说明:',
                                     'text':
                                         '1. 部署 ncm-api：docker run -d --name ncm-api '
@@ -1114,10 +1239,11 @@ class MusicSubscribe(_PluginBase):
                                         '地址填 http://192.168.X.X:1630; \n'
                                         '2. 登录网易云后按栏位填写歌单同步设置'
                                         '（QQ音乐 / 网易云 / 汽水音乐三处互相独立，一行一个）; \n'
-                                        '3. 开启「库内没有的歌曲转为音乐订阅」后，'
-                                        '同步时没搜到的歌曲会自动加入 MoviePilot 音乐订阅; \n'
-                                        '4. 同步只添加媒体库已有歌曲，不会自动下载; \n'
-                                        '5. 点顶部「详情」查看同步情况与订阅数量; \n',
+                                        '3. 听歌模式选好场景即可，每天定时自动取官方热门歌单刷新; \n'
+                                        '4. 开启「库内没有的歌曲转为音乐订阅」后，'
+                                        '同步时没搜到的歌曲会按上面的订阅粒度自动加入 MoviePilot 音乐订阅; \n'
+                                        '5. 同步只添加媒体库已有歌曲，不会自动下载; \n'
+                                        '6. 点顶部「详情」查看同步情况与订阅数量; \n',
                                 },
                             }
                         ],
@@ -1194,6 +1320,9 @@ class MusicSubscribe(_PluginBase):
             "wymusic_paths": "",
             "qqmusic_paths": "",
             "qishui_paths": "",
+            "listen_presets": [],
+            "listen_extra": "",
+            "subscribe_scope": self.DEFAULT_SUBSCRIBE_SCOPE,
             "wy_logout": False,
             "subscribe_remove_ids": "",
             "subscribe_clear_own": False,
@@ -1231,6 +1360,9 @@ class MusicSubscribe(_PluginBase):
         except Exception:  # noqa: BLE001 - 老宿主没有订阅表
             sub_available = False
         sub_index = {sub.id: sub for sub in self._list_music_subscribes()} if sub_available else {}
+
+        # 概览统计里的「音乐订阅」取本次新增 + 累计登记，未同步过时用累计数
+        sub_added_total = len(records) or subscribe_report.get("added", 0)
 
         content: List[dict] = []
 
@@ -1286,46 +1418,42 @@ class MusicSubscribe(_PluginBase):
                 },
             })
 
-        # ---------------- 2. 同步数量 ----------------
+        # ---------------- 2. 统计卡片（参考自动订阅助手的概览样式） ----------------
+        stat_cards = [
+            (totals.get("playlists", 0), "同步歌单数", "primary"),
+            (totals.get("tracks", 0), "同步曲目", "info"),
+            (totals.get("added", 0), "本次新增", "success"),
+            (totals.get("missing", 0), "库内缺失", "warning"),
+            (sub_added_total, "音乐订阅", "secondary"),
+            (totals.get("failed", 0), "异常条目",
+             "error" if totals.get("failed") else "default"),
+        ]
         content.append({
-            "component": "VSheet",
-            "props": {
-                "color": "transparent",
-                "class": "d-flex flex-wrap align-center ga-2 px-4 py-2",
-            },
+            "component": "VRow",
+            "props": {"class": "mt-2"},
             "content": [
-                self._chip(f"同步条数 {totals.get('playlists', 0)}", "primary"),
-                self._chip(f"歌曲总数 {totals.get('tracks', 0)}", "info"),
-                self._chip(f"本次新增 {totals.get('added', 0)}", "success"),
-                self._chip(f"库内缺失 {totals.get('missing', 0)}", "warning"),
-                self._chip(f"失败条目 {totals.get('failed', 0)}",
-                           "error" if totals.get("failed") else "default"),
+                self._stat_card(value, label, color)
+                for value, label, color in stat_cards
             ],
         })
 
-        # ---------------- 3. 同步明细 ----------------
-        content.append(self._page_table(
-            "同步明细",
-            [
-                {"title": "媒体服务器", "key": "server"},
-                {"title": "来源", "key": "source"},
-                {"title": "目标播放列表", "key": "playlist"},
-                {"title": "歌曲数", "key": "total"},
-                {"title": "已存在", "key": "existing"},
-                {"title": "本次新增", "key": "added"},
-                {"title": "库内缺失", "key": "missing"},
-                {"title": "状态", "key": "status_text"},
-                {"title": "说明", "key": "message"},
-            ],
-            [
-                {
-                    **item,
-                    "status_text": "正常" if item.get("status") == "ok" else "异常",
-                }
-                for item in items
-            ],
-            "本次同步没有产生任何条目。检查是否已勾选同步项、媒体服务器是否可用。",
-        ))
+        # ---------------- 3. 同步明细（卡片网格） ----------------
+        if items:
+            content.append({
+                "component": "VRow",
+                "content": [self._playlist_card(item) for item in items],
+            })
+        else:
+            content.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "title": "同步明细",
+                    "text": "本次同步没有产生任何条目。检查是否已勾选同步项、"
+                            "媒体服务器是否可用。",
+                },
+            })
 
         # ---------------- 4. 订阅情况 ----------------
         sub_added = subscribe_report.get("added", 0)
@@ -1464,6 +1592,53 @@ class MusicSubscribe(_PluginBase):
                 },
             })
         return block
+
+    @staticmethod
+    def _stat_card(value: Any, label: str, color: str = "primary") -> dict:
+        """生成详情页顶部的统计卡片（大数字 + 说明）。"""
+        return {
+            "component": "VCol",
+            "props": {"cols": 6, "sm": 4, "md": 2},
+            "content": [{
+                "component": "VCard",
+                "props": {
+                    "variant": "tonal",
+                    "color": color,
+                    "density": "compact",
+                    "title": str(value if value is not None else 0),
+                    "subtitle": label,
+                },
+            }],
+        }
+
+    def _playlist_card(self, item: Dict[str, Any]) -> dict:
+        """把一条同步明细渲染成卡片（对齐自动订阅助手的卡片网格风格）。"""
+        ok = item.get("status") == "ok"
+        playlist = item.get("playlist") or "未命名歌单"
+        source = item.get("source") or ""
+        server = item.get("server") or ""
+        lines = (
+            f"共 {item.get('total', 0)} 首 · 已入库 {item.get('existing', 0)}"
+            f" · 新增 {item.get('added', 0)} · 缺失 {item.get('missing', 0)}"
+        )
+        message = item.get("message") or ""
+        if message:
+            lines += f"\n{message}"
+        return {
+            "component": "VCol",
+            "props": {"cols": 12, "sm": 6, "md": 4},
+            "content": [{
+                "component": "VCard",
+                "props": {
+                    "variant": "tonal",
+                    "color": None if ok else "error",
+                    "density": "compact",
+                    "title": playlist,
+                    "subtitle": f"{source} · {server}" if server else source,
+                    "text": lines,
+                },
+            }],
+        }
 
     @staticmethod
     def _col(md: int, component: dict) -> dict:
@@ -1965,6 +2140,8 @@ class MusicSubscribe(_PluginBase):
             self._qishui_paths,
             self._wy_daily_list,
             self._wy_daily_song,
+            self._listen_presets,
+            self._listen_extra,
         )):
             logger.info("同步配置为空,不进行处理。告退......")
             return
@@ -2079,6 +2256,14 @@ class MusicSubscribe(_PluginBase):
             for path in qishui_paths:
                 self._sync_qishui(path, server, emby_users, name)
 
+            # 听歌模式：场景预设自动同步（零人工维护），失败逐条落盘
+            if self._listen_presets or self._listen_extra:
+                if ncm_ready:
+                    self._sync_listen(server, name, emby_users)
+                else:
+                    self._record(name, "听歌模式", "-", status="error",
+                                 message="未配置可用的 ncm-api 服务地址")
+
             # 网易云每日推荐：同步时实时复查登录态，不依赖 init_plugin 时的缓存
             if ncm_ready:
                 self._sync_daily(server, name, emby_users)
@@ -2137,6 +2322,60 @@ class MusicSubscribe(_PluginBase):
             self.save_data(self.SYNC_STATS_KEY, merged)
         except Exception as error:  # noqa: BLE001 - 统计写失败不影响同步主流程
             logger.warning(f"保存同步统计失败（已忽略）：{error}")
+
+    def _listen_tasks(self) -> List[Tuple[str, str, str]]:
+        """把听歌模式配置展开成 ``(显示名, 网易云分类, 播放列表名)`` 任务列表。"""
+        tasks: List[Tuple[str, str, str]] = []
+        seen_names = {item[1] for item in tasks}
+        for key in self._listen_presets:
+            preset = next((p for p in self.LISTEN_PRESETS if p[0] == key), None)
+            if not preset:
+                continue
+            label, cat = preset[1], preset[2]
+            tasks.append((label, cat, label))
+            seen_names.add(label)
+        for line in self._split_paths(self._listen_extra):
+            # 自定义行格式：网易云分类:播放列表名（省略歌单名时直接用分类名）
+            cat, _, playlist = line.partition(":")
+            cat = cat.strip()
+            playlist = playlist.strip() or cat
+            if not cat:
+                continue
+            if playlist in seen_names:
+                continue
+            tasks.append((playlist, cat, playlist))
+            seen_names.add(playlist)
+        return tasks
+
+    def _sync_listen(self, server, server_name: str, emby_users: List[str]) -> None:
+        """同步听歌模式：每个场景取网易云该分类的热门榜首歌单，自动刷新。
+
+        官方场景歌单每天都会更新，插件按固定名称覆盖式同步到媒体库，
+        内容自动跟随，不需要人工维护。
+        """
+        tasks = self._listen_tasks()
+        if not tasks:
+            return
+        if not (self.cm and self.cm.api.available):
+            return
+        for label, cat, playlist in tasks:
+            try:
+                picked = self.cm.get_category_playlists(cat, nums=1)
+            except Exception as error:  # noqa: BLE001 - 单个场景失败不影响其它
+                logger.error(f"听歌模式[{label}]获取场景歌单失败：{error}")
+                self._record(server_name, f"听歌模式·{label}", playlist,
+                             status="error", message=str(error))
+                continue
+            if not picked:
+                continue
+            wy_play_id, wy_name = picked[self.LISTEN_PICK_INDEX][0], picked[self.LISTEN_PICK_INDEX][1]
+            logger.info(
+                f"听歌模式[{label}]使用网易云分类[{cat}]的热门歌单 "
+                f"{wy_name}({wy_play_id})，同步为播放列表[{playlist}]")
+            self.cm_emby_plex(
+                wy_play_id, playlist, emby_users, server.type,
+                server_name, f"听歌模式·{label}",
+            )
 
     def _sync_daily(self, server, server_name: str, emby_users: List[str]) -> None:
         """同步网易云每日推荐歌单与歌曲，失败原因直接写进日志和统计。"""
@@ -2204,9 +2443,17 @@ class MusicSubscribe(_PluginBase):
     def _add_music_subscribes(self, t_tracks, missing_titles) -> None:
         """把同步时在媒体库里没搜到的歌曲转为 MoviePilot 音乐订阅。
 
-        宿主 V3 提供完整的音乐订阅链路（MusicBrainz 等识别源），这里只负责
-        把缺歌信息递给 SubscribeChain；识别失败的音乐记日志跳过，不影响同步。
-        结果累计进 ``self._sub_report``，并登记订阅 id 供详情页做订阅管理。
+        宿主对音乐订阅要求识别结果带媒体来源与 ID；默认只按 MusicBrainz
+        搜标题，中文歌经常查不到（MusicBrainz 还频繁 503），表现为日志里
+        「未识别到媒体信息」。这里改成识别梯，显著提高订阅成功率：
+
+        1. 豆瓣音乐源识别（单曲或所在专辑，中文覆盖率远高于 MusicBrainz），
+           拿到身份后带 ``media_source/media_id`` 显式订阅；
+        2. 宿主默认路径兜底（MusicBrainz 按标题搜索）。
+
+        订阅粒度由「订阅范围」配置决定：仅单曲 / 单曲优先失败转所在专辑
+        （推荐）/ 仅订阅所在专辑。结果累计进 ``self._sub_report`` 并登记
+        订阅 id 供详情页做订阅管理。
         """
         if not missing_titles or not self._wy_subscribe:
             return
@@ -2216,46 +2463,195 @@ class MusicSubscribe(_PluginBase):
         except Exception as error:  # noqa: BLE001 - 宿主过旧或音乐链未启用
             logger.warning(f"宿主不支持音乐订阅，跳过转订阅（{error}）")
             return
-        # 给识别链多一个线索：标题带上第一位歌手
-        artist_map: Dict[str, str] = {}
+
+        # 标题 -> (第一位歌手, 所属专辑)：同步时拿到的曲目元数据是识别梯的重要线索
+        track_map: Dict[str, Tuple[str, str]] = {}
         for track in t_tracks:
-            if track and track[0] in missing_titles and track[0] not in artist_map:
-                artists = track[1] if len(track) > 1 and track[1] else []
-                artist_map[track[0]] = artists[0] if artists else ""
+            if not track or track[0] in track_map:
+                continue
+            artists = track[1] if len(track) > 1 and track[1] else []
+            album = track[2] if len(track) > 2 and track[2] else ""
+            track_map[track[0]] = (artists[0] if artists else "", album)
+
         chain = SubscribeChain()
         added = exists = failed = 0
         new_records: List[Dict[str, Any]] = []
         for title in missing_titles:
-            artist = artist_map.get(title, "")
+            artist, album = track_map.get(title, ("", ""))
             keyword = f"{artist} {title}".strip()
-            try:
-                subscribe_id, message = chain.add(
-                    title=keyword,
-                    year="",
-                    mtype=MediaType.MUSIC,
-                    music_type="recording",
-                    exist_ok=True,
-                    message=False,
-                )
-            except Exception as error:  # noqa: BLE001 - 单首失败不中断整批
-                failed += 1
-                logger.warning(f"音乐订阅失败[{keyword}]：{error}")
-                continue
-            if subscribe_id:
-                added += 1
-                logger.info(f"音乐订阅成功：{keyword}")
-                new_records.append({
-                    "id": subscribe_id,
-                    "title": title,
-                    "artist": artist,
-                    "keyword": keyword,
-                })
-            else:
+            subscribed = False
+            for music_type, display, media_source, media_id in self._subscribe_ladder(
+                    title, artist, album):
+                try:
+                    subscribe_id, message = chain.add(
+                        title=display,
+                        year="",
+                        mtype=MediaType.MUSIC,
+                        music_type=music_type,
+                        media_source=media_source,
+                        media_id=media_id,
+                        exist_ok=True,
+                        message=False,
+                    )
+                except Exception as error:  # noqa: BLE001 - 单次尝试失败继续下一梯
+                    logger.info(f"音乐订阅[{display}·{music_type}]尝试失败：{error}")
+                    continue
+                if subscribe_id:
+                    added += 1
+                    subscribed = True
+                    logger.info(
+                        f"音乐订阅成功：{display}（{music_type}"
+                        f"{f'·{media_source}' if media_source else ''}）")
+                    new_records.append({
+                        "id": subscribe_id,
+                        "title": title,
+                        "artist": artist,
+                        "keyword": display,
+                        "music_type": music_type,
+                    })
+                    break
+                logger.info(f"音乐订阅未新增：{display}（{music_type}，{message}）")
+                # 「已存在」也算订阅完成，不再往下一梯重试
+                if message and "已存在" in str(message):
+                    exists += 1
+                    subscribed = True
+                    break
+            if not subscribed and self._subscribe_scope != "album_only":
+                # 全部梯子用尽仍未订阅成功：按宿主默认路径（MusicBrainz）兜底。
+                # 「仅订阅所在专辑」范围下不落回单曲，避免违背用户选择的粒度。
+                try:
+                    subscribe_id, message = chain.add(
+                        title=keyword,
+                        year="",
+                        mtype=MediaType.MUSIC,
+                        music_type="recording",
+                        exist_ok=True,
+                        message=False,
+                    )
+                except Exception as error:  # noqa: BLE001
+                    failed += 1
+                    logger.warning(f"音乐订阅失败[{keyword}]：{error}")
+                    continue
+                if subscribe_id:
+                    added += 1
+                    logger.info(f"音乐订阅成功：{keyword}")
+                    new_records.append({
+                        "id": subscribe_id,
+                        "title": title,
+                        "artist": artist,
+                        "keyword": keyword,
+                        "music_type": "recording",
+                    })
+                elif message and "已存在" in str(message):
+                    exists += 1
+                else:
+                    exists += 1
+                    logger.info(f"音乐订阅未新增：{keyword}（{message}）")
+            elif not subscribed:
                 exists += 1
-                logger.info(f"音乐订阅未新增：{keyword}（{message}）")
+                logger.info(f"音乐订阅未新增：{title}（仅专辑范围内未找到可订阅的专辑）")
         logger.info(
             f"音乐订阅处理完成：新增 {added}，已存在/未识别 {exists}，失败 {failed}")
         self._accumulate_subscribes(added, exists, failed, new_records)
+
+    def _subscribe_ladder(
+        self,
+        title: str,
+        artist: str,
+        album: str,
+    ) -> List[Tuple[str, str, Optional[Any], Optional[str]]]:
+        """按「订阅范围」配置生成单首缺歌的订阅尝试梯。
+
+        :return: ``[(music_type, 订阅标题, media_source, media_id), ...]``；
+            ``media_source`` 为 None 的条目交给宿主按标题识别（MusicBrainz）。
+        """
+        scope = self._subscribe_scope
+        ladder: List[Tuple[str, str, Optional[Any], Optional[str]]] = []
+
+        def push_recording(source=None, media_id=None, display=None):
+            ladder.append((
+                "recording",
+                display or f"{artist} {title}".strip(),
+                source, media_id,
+            ))
+
+        def push_album(source=None, media_id=None, display=None):
+            name = display or album or title
+            if name:
+                ladder.append(("album", name, source, media_id))
+
+        if scope != "recording":
+            # 专辑梯：优先用同步时拿到的真实专辑名走豆瓣识别
+            info = self._recognize_douban("album", title, artist, album)
+            if info:
+                push_album(info[0], info[1], display=info[2])
+            else:
+                push_album()  # 交给宿主按专辑名识别（MusicBrainz release-group）
+        if scope != "album_only":
+            # 单曲梯：先豆瓣单曲识别，失败再交给宿主
+            info = self._recognize_douban("recording", title, artist, album)
+            if info:
+                ladder.append((
+                    "recording",
+                    f"{artist} {title}".strip() if artist else title,
+                    info[0], info[1],
+                ))
+            else:
+                push_recording()
+        return ladder
+
+    def _recognize_douban(
+        self,
+        music_type: str,
+        title: str,
+        artist: str,
+        album: str,
+    ) -> Optional[Tuple[Any, str, str]]:
+        """用宿主内置的豆瓣音乐源识别单曲或专辑。
+
+        豆瓣对中文音乐的覆盖远好于 MusicBrainz，且返回结果自带媒体身份
+        （media_source/media_id）与专辑曲目总数，是提高订阅成功率的关键。
+
+        :return: ``(media_source, media_id, 订阅标题)``，识别失败返回 None
+        """
+        if not title:
+            return None
+        try:
+            from app.chain.douban import DoubanChain
+            from app.domain.meta.metamusic import MetaMusic
+        except Exception as error:  # noqa: BLE001 - 宿主过旧没有豆瓣音乐链
+            logger.debug(f"宿主不支持豆瓣音乐识别（{error}）")
+            return None
+        try:
+            if music_type == "album":
+                meta = MetaMusic(title=album or title, artists=[artist] if artist else None)
+            else:
+                meta = MetaMusic(
+                    title=title,
+                    artists=[artist] if artist else None,
+                    album=album or None,
+                )
+            info = DoubanChain().recognize_music(meta=meta, music_type=music_type)
+        except Exception as error:  # noqa: BLE001 - 识别失败按无结果处理
+            logger.info(f"豆瓣音乐识别[{music_type}·{title}]失败：{error}")
+            return None
+        if not info:
+            return None
+        media_source = getattr(info, "media_source", None)
+        media_id = getattr(info, "media_id", None)
+        if not media_source or not media_id or str(media_id) in ("", "0"):
+            return None
+        if music_type == "album":
+            # 宿主硬性要求专辑订阅带曲目总数，缺了必然被拒
+            total = getattr(info, "total_tracks", None)
+            try:
+                total = int(total) if total is not None else None
+            except (TypeError, ValueError):
+                total = None
+            if not total or total <= 0:
+                logger.info(f"豆瓣专辑[{getattr(info, 'title', title)}]曲目数未知，放弃专辑订阅")
+                return None
+        return media_source, str(media_id), getattr(info, "title", None) or (album or title)
 
     def _accumulate_subscribes(
         self,
