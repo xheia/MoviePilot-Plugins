@@ -254,7 +254,7 @@ async function (event) {
 
 class MusicSubscribe(_PluginBase):
     # 插件名称
-    plugin_name = "歌单订阅"
+    plugin_name = "歌单订阅工具"
     # 插件描述
     plugin_desc = "把网易云/QQ/汽水音乐歌单与场景化听歌模式自动同步成 Plex/Emby 播放列表，库内没有的歌曲先缓存待处理，去网易云校验后可一键推送订阅。"
     # 插件图标
@@ -264,7 +264,7 @@ class MusicSubscribe(_PluginBase):
     # 插件作者
     plugin_author = "xheia"
     # 作者主页
-    author_url = "https://github.com/xheia"
+    author_url = "https://github.com/xheia/MoviePilot-Plugins"
     # 插件配置项ID前缀
     plugin_config_prefix = "music_"
     # 加载顺序
