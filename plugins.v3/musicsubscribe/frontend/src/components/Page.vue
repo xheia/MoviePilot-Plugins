@@ -72,7 +72,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="row in pagedRows" :key="row.seq" :class="{ 'ms-row--done': row.subscribed }">
+            <tr v-for="row in pagedRows" :key="row.seq" :class="{ 'ms-row--fail': row.subscribe_message }">
               <td class="col-seq">{{ row.seq }}</td>
               <td class="col-pick">
                 <input type="radio" :name="`pick-${row.seq}`" :checked="picks[row.seq] === 'song'"
@@ -87,12 +87,8 @@
                 <div class="ms-sub">
                   <span class="ms-src">{{ row.source }}</span>
                   <span v-if="row.hits > 1"> · 命中 {{ row.hits }} 次</span>
-                  <span v-if="row.subscribed" class="ms-done">
-                    · 已订阅{{ row.subscribe_type === 'album' ? '专辑' : '歌曲' }}
-                    <span v-if="row.subscribe_time">（{{ row.subscribe_time }}）</span>
-                  </span>
-                  <span v-if="row.subscribed && row.subscribe_message" class="ms-done"> ·
-                    {{ row.subscribe_message }}</span>
+                  <span v-if="row.subscribe_message" class="ms-fail"> ·
+                    上次订阅失败：{{ row.subscribe_message }}</span>
                 </div>
               </td>
               <td class="col-dur">{{ row.duration_text || '-' }}</td>
@@ -130,7 +126,7 @@
           <v-btn variant="text" prepend-icon="mdi-broom" v-bind="menuProps">清理</v-btn>
         </template>
         <v-list density="compact">
-          <v-list-item title="清理已订阅记录" @click="clearPending('subscribed')" />
+          <v-list-item title="清理订阅失败记录" @click="clearPending('failed')" />
           <v-list-item title="清空整个清单" @click="clearPending('all')" />
         </v-list>
       </v-menu>
@@ -161,7 +157,7 @@ const result = ref('')
 const resultLevel = ref('success')
 
 const items = ref([])
-const summary = reactive({ total: 0, pending: 0, subscribed: 0 })
+const summary = reactive({ total: 0, failed: 0 })
 const stats = ref({})
 const targets = ref([{ value: 'song', label: '歌曲' }, { value: 'album', label: '专辑' }])
 
@@ -177,9 +173,8 @@ const picks = reactive({})
 const syncMissing = computed(() => Number(stats.value?.missing) || 0)
 
 const statCards = computed(() => [
-  { key: 'all', label: '全部', count: summary.total },
-  { key: 'pending', label: '待订阅', count: summary.pending },
-  { key: 'subscribed', label: '已订阅', count: summary.subscribed },
+  { key: 'all', label: '待处理', count: summary.total },
+  { key: 'failed', label: '订阅失败', count: summary.failed },
 ])
 
 const sourceOptions = computed(() => {
@@ -190,8 +185,7 @@ const sourceOptions = computed(() => {
 const rows = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
   let list = items.value
-  if (scope.value === 'pending') list = list.filter(i => !i.subscribed)
-  else if (scope.value === 'subscribed') list = list.filter(i => i.subscribed)
+  if (scope.value === 'failed') list = list.filter(i => !!(i.subscribe_message || ''))
   if (sourceFilter.value) list = list.filter(i => i.source === sourceFilter.value)
   if (kw) {
     list = list.filter(i =>
@@ -235,7 +229,7 @@ async function load() {
   try {
     const res = await call('get', `${PLUGIN}/pending?scope=${encodeURIComponent(scope.value)}`)
     items.value = Array.isArray(res?.items) ? res.items : []
-    Object.assign(summary, res?.summary || { total: 0, pending: 0, subscribed: 0 })
+    Object.assign(summary, res?.summary || { total: 0, failed: 0 })
     stats.value = res?.stats || {}
     if (Array.isArray(res?.targets) && res.targets.length) targets.value = res.targets
     const alive = new Set(items.value.map(i => Number(i.seq)))
@@ -286,9 +280,10 @@ async function subscribePicked() {
     const res = await call('post', `${PLUGIN}/pending/subscribe`, { items: payload })
     if (res?.code === 0) {
       const failed = (res.results || []).filter(r => !r.ok)
+      const detail = failed.map(f => `${f.title}（${f.message}）`).slice(0, 3).join('；')
       resultLevel.value = failed.length ? 'warning' : 'success'
       result.value = failed.length
-        ? `订阅完成，${failed.length} 条失败：${failed.map(f => `${f.title}（${f.message}）`).slice(0, 3).join('；')}`
+        ? `订阅完成：${payload.length - failed.length} 条已推送订阅并从清单移除，${failed.length} 条失败：${detail}`
         : (res.message || '订阅完成')
       clearPick()
       await load()
@@ -541,12 +536,13 @@ button.ms-stat {
   color: rgba(var(--v-theme-primary), 0.9);
 }
 
-.ms-done {
-  color: rgb(var(--v-theme-success));
+/* 订阅失败的行留在清单里，用淡红底 + 红字标出原因 */
+.ms-fail {
+  color: rgb(var(--v-theme-error));
 }
 
-.ms-row--done {
-  background: rgba(var(--v-theme-success), 0.05);
+.ms-row--fail {
+  background: rgba(var(--v-theme-error), 0.05);
 }
 
 .ms-empty {

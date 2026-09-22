@@ -28,7 +28,7 @@ from app.sdk.services import ServiceConfigHelper
 from .config import (
     CONFIG_PREFIX,
     DEFAULT_NCM_API_URL,
-    LOGIN_TYPES,
+    DOUBAN_SOURCE_VALUE,
     defaults,
     normalize,
     parse_playlist_line,
@@ -74,7 +74,7 @@ class MusicSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "music.png"
     # 插件版本
-    plugin_version = "2.0.0"
+    plugin_version = "2.1.0"
     # 插件作者
     plugin_author = "xheia"
     # 作者主页
@@ -89,15 +89,12 @@ class MusicSubscribe(_PluginBase):
     # 配置（init_plugin 时从宿主读取）
     _config: Dict[str, Any] = {}
     _enabled = False
-    _onlyonce = False
     _cron: Optional[str] = None
     _media_server: List[str] = []
     _exact_match = True
+    #: 缺失曲目搜索是否带上豆瓣音乐源（关闭则按宿主的音乐元数据源设置搜索）
+    _douban_source = True
     _ncm_api_url = DEFAULT_NCM_API_URL
-    _login_type = "qrcode"
-    _wylogin_user = ""
-    _wylogin_password = ""
-    _wylogin_cookie = ""
     _wymusic_paths = ""
     _qqmusic_paths = ""
     _qishui_paths = ""
@@ -130,15 +127,11 @@ class MusicSubscribe(_PluginBase):
         self._config = normalize(config)
         cfg = self._config
         self._enabled = cfg["enabled"]
-        self._onlyonce = cfg["onlyonce"]
         self._cron = cfg["cron"]
         self._media_server = list(cfg["media_server"])
         self._exact_match = cfg["exact_match"]
+        self._douban_source = cfg["douban_source"]
         self._ncm_api_url = cfg["ncm_api_url"] or DEFAULT_NCM_API_URL
-        self._login_type = cfg["login_type"]
-        self._wylogin_user = cfg["wylogin_user"]
-        self._wylogin_password = cfg["wylogin_password"]
-        self._wylogin_cookie = cfg["wylogin_cookie"]
         self._wymusic_paths = cfg["wymusic_paths"]
         self._qqmusic_paths = cfg["qqmusic_paths"]
         self._qishui_paths = cfg["qishui_paths"]
@@ -147,7 +140,7 @@ class MusicSubscribe(_PluginBase):
 
         # 每次载入配置都换一份新的运行时对象，避免旧缓存跨配置复用
         self.netease = NeteaseClient(base_url=self._ncm_api_url, data_path=self.get_data_path())
-        self._subscriber = MusicSubscriber()
+        self._subscriber = MusicSubscriber(sources=self._music_sources())
         self._pending = PendingStore(self.get_data, self.save_data)
         self._round_missing = {}
 
@@ -159,23 +152,8 @@ class MusicSubscribe(_PluginBase):
             if conf.enabled
         ]
 
-        # 登录态：优先用已有 Cookie；密码登录方式下 Cookie 失效时自动续登
+        # 登录态：读 ncm-api 里的网易云 Cookie（只支持扫码登录）
         self._username = self.netease.login_status()
-        if (not self._username and self._login_type == "password"
-                and self._wylogin_user and self._wylogin_password):
-            try:
-                self.netease.login_by_password(self._wylogin_user, self._wylogin_password)
-                self._username = self.netease.login_status()
-            except NeteaseError as error:
-                logger.error(f"网易云自动续登失败：{error}")
-
-        if self._enabled or self._onlyonce:
-            if self._onlyonce:
-                logger.info(f"{self.plugin_name}：立即运行一次")
-                self._schedule_once(self._run_sync)
-                # 一次性开关复位并落盘，配置页下次打开就是关闭状态
-                self._onlyonce = False
-                self._save_config(onlyonce=False)
 
     def get_state(self) -> bool:
         """插件是否处于生效状态。"""
@@ -246,10 +224,6 @@ class MusicSubscribe(_PluginBase):
              "auth": "bear", "summary": "获取网易云扫码登录二维码"},
             {"path": "/qrcode/status", "endpoint": self.api_qrcode_status, "methods": ["GET"],
              "auth": "bear", "summary": "查询扫码状态，成功后自动保存登录"},
-            {"path": "/captcha/send", "endpoint": self.api_captcha_send, "methods": ["POST"],
-             "auth": "bear", "summary": "发送网易云登录短信验证码"},
-            {"path": "/login", "endpoint": self.api_login, "methods": ["POST"],
-             "auth": "bear", "summary": "验证码 / 密码 / Cookie 登录"},
             {"path": "/logout", "endpoint": self.api_logout, "methods": ["POST"],
              "auth": "bear", "summary": "退出网易云登录并清除本地凭证"},
             {"path": "/run", "endpoint": self.api_run, "methods": ["POST"],
@@ -262,7 +236,7 @@ class MusicSubscribe(_PluginBase):
             {"path": "/pending/remove", "endpoint": self.api_pending_remove,
              "methods": ["POST"], "auth": "bear", "summary": "从清单移除勾选的记录"},
             {"path": "/pending/clear", "endpoint": self.api_pending_clear,
-             "methods": ["POST"], "auth": "bear", "summary": "清理清单（全部 / 仅已订阅）"},
+             "methods": ["POST"], "auth": "bear", "summary": "清理清单（全部 / 仅失败记录）"},
         ]
 
     # ------------------------------------------------------------------
@@ -306,10 +280,31 @@ class MusicSubscribe(_PluginBase):
         return self._pending
 
     def _subscribes(self) -> MusicSubscriber:
-        """取订阅器。"""
+        """取订阅器（按当前配置携带音乐搜索来源）。"""
         if self._subscriber is None:
-            self._subscriber = MusicSubscriber()
+            self._subscriber = MusicSubscriber(sources=self._music_sources())
         return self._subscriber
+
+    def _music_sources(self) -> Tuple[Any, ...]:
+        """缺失曲目搜索使用的音乐来源。
+
+        开启「豆瓣音乐源」时显式带上 ``MediaSource.DoubanMusic``；关闭则返回空元组，
+        交给宿主按自己的音乐元数据源设置搜索。
+        """
+        if not self._douban_source:
+            return ()
+        try:
+            from app.schemas.types import MediaSource
+        except Exception:  # noqa: BLE001 - 宿主过旧
+            return ()
+        source = getattr(MediaSource, "DoubanMusic", None)
+        if source is None:
+            try:
+                source = MediaSource(DOUBAN_SOURCE_VALUE)
+            except Exception:  # noqa: BLE001 - 宿主不支持该来源
+                logger.warning("当前宿主没有豆瓣音乐源，缺失曲目按宿主默认来源搜索")
+                return ()
+        return (source,)
 
     @staticmethod
     def _now() -> str:
@@ -335,8 +330,6 @@ class MusicSubscribe(_PluginBase):
             "username": username or "",
             "logged_in": bool(username),
             "ncm_api_url": self._ncm_api_url,
-            "login_type": self._login_type,
-            "login_types": [{"value": key, "label": label} for key, label in LOGIN_TYPES],
             "media_servers": list(self.media_list),
             "selected_servers": list(self._media_server),
             "config": dict(self._config),
@@ -379,37 +372,6 @@ class MusicSubscribe(_PluginBase):
             "username": self._username or "",
         }
 
-    def api_captcha_send(self, phone: str = "") -> Dict[str, Any]:
-        """发送登录短信验证码。"""
-        try:
-            self._netease().send_captcha(phone)
-        except NeteaseError as error:
-            return {"code": 1, "message": f"发送验证码失败：{error}"}
-        return {"code": 0, "message": "验证码已发送"}
-
-    def api_login(self, request: dict = None, login_type: str = "") -> Dict[str, Any]:
-        """按登录方式登录网易云（参数支持 body 或 query）。"""
-        data = request if isinstance(request, dict) else {}
-        mode = (login_type or data.get("login_type") or self._login_type or "qrcode").strip()
-        client = self._netease()
-        try:
-            if mode == "cookie":
-                client.login_by_cookie(data.get("cookie") or self._wylogin_cookie)
-            elif mode == "captcha":
-                client.login_by_captcha(
-                    data.get("user") or self._wylogin_user, data.get("captcha") or "")
-            elif mode == "password":
-                client.login_by_password(
-                    data.get("user") or self._wylogin_user,
-                    data.get("password") or self._wylogin_password)
-            else:
-                return {"code": 1, "message": "扫码登录请点击「获取二维码」后扫码"}
-        except NeteaseError as error:
-            return {"code": 1, "message": str(error)}
-        self._username = client.login_status()
-        return {"code": 0, "message": f"登录成功：{self._username or ''}",
-                "username": self._username or ""}
-
     def api_logout(self) -> Dict[str, Any]:
         """退出网易云登录（按钮动作）。"""
         try:
@@ -429,13 +391,11 @@ class MusicSubscribe(_PluginBase):
     # ------------------------------------------------------------------
 
     def api_pending(self, scope: str = "all") -> Dict[str, Any]:
-        """查询清单；``scope`` 取 ``all`` / ``pending`` / ``subscribed``。"""
+        """查询清单；``scope`` 取 ``all`` / ``failed``（仅订阅失败的记录）。"""
         records = self._store().records()
         mode = (scope or "all").strip().lower()
-        if mode == "pending":
-            records = [item for item in records if not item.get("subscribed")]
-        elif mode == "subscribed":
-            records = [item for item in records if item.get("subscribed")]
+        if mode == "failed":
+            records = [item for item in records if (item.get("subscribe_message") or "")]
         return {
             "code": 0,
             "items": records,
@@ -475,7 +435,7 @@ class MusicSubscribe(_PluginBase):
 
         subscriber = self._subscribes()
         subscriber.reset()
-        now = self._now()
+        done_seqs: List[int] = []
         updates: List[Dict[str, Any]] = []
         results: List[Dict[str, Any]] = []
         succeeded = failed = 0
@@ -488,12 +448,12 @@ class MusicSubscribe(_PluginBase):
                 duration=int(record.get("duration") or 0),
             )
             result = subscriber.subscribe(track, target)
-            record["subscribed"] = bool(result.get("ok"))
-            record["subscribe_type"] = result.get("type") or ""
-            record["subscribe_id"] = result.get("id") or 0
-            record["subscribe_time"] = now
-            record["subscribe_message"] = result.get("message") or ""
-            updates.append(record)
+            if result.get("ok"):
+                # 订阅成功即移出清单：订阅本身去宿主的订阅列表里管理
+                done_seqs.append(int(record.get("seq") or 0))
+            else:
+                record["subscribe_message"] = result.get("message") or ""
+                updates.append(record)
             results.append({
                 "seq": record.get("seq"),
                 "title": record.get("title"),
@@ -506,9 +466,11 @@ class MusicSubscribe(_PluginBase):
             else:
                 failed += 1
         self._store().apply(updates)
+        if done_seqs:
+            self._store().remove(done_seqs)
         logger.info(
             f"缺失曲目订阅完成：成功 {succeeded}，失败 {failed}"
-            f"（清单剩余 {self._store().summary()['pending']} 首待订阅）")
+            f"（清单剩余 {self._store().summary()['total']} 条待处理）")
         return {
             "code": 0,
             "message": f"订阅完成：成功 {succeeded}，失败 {failed}",
@@ -527,11 +489,11 @@ class MusicSubscribe(_PluginBase):
                 "summary": self._store().summary()}
 
     def api_pending_clear(self, request: dict = None, scope: str = "all") -> Dict[str, Any]:
-        """清理清单：``scope=all`` 全部 / ``scope=subscribed`` 仅已订阅。"""
+        """清理清单：``scope=all`` 全部 / ``scope=failed`` 仅订阅失败的记录。"""
         data = request if isinstance(request, dict) else {}
         mode = str(data.get("scope") or scope or "all").lower()
         removed = self._store().clear(mode)
-        label = "已订阅" if mode == "subscribed" else "全部"
+        label = "订阅失败记录" if mode == "failed" else "全部"
         return {"code": 0, "message": f"已清理{label} {removed} 条", "removed": removed,
                 "summary": self._store().summary()}
 
@@ -541,12 +503,6 @@ class MusicSubscribe(_PluginBase):
 
     def _run_sync(self) -> None:
         """同步入口：记账 + 兜底异常，保证数据页始终有本次结果可看。"""
-        # 「立即运行一次」是一次性开关：实际开跑时再复位一次并落盘，
-        # 兜住「宿主保存配置的时序在 init_plugin 之后又回写一次」的情况
-        if self._onlyonce:
-            self._onlyonce = False
-            self._save_config(onlyonce=False)
-
         started = time.time()
         self._round_missing = {}
         self._subscribes().reset()

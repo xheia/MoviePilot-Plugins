@@ -52,10 +52,17 @@
             <p class="ms-hint">关闭后不再注册定时任务，也无法手动运行。</p>
             <v-text-field v-model="form.cron" placeholder="0 4 * * *" hint="五位 cron 表达式，留空表示不定时运行"
               label="定时同步周期" persistent-hint />
-            <v-switch v-model="form.onlyonce" color="primary" inset>
-              <template #label><span class="ms-label">保存后立即运行一次</span></template>
+          </section>
+
+          <v-divider />
+
+          <section class="ms-section">
+            <h3 class="ms-section__title">缺失曲目订阅</h3>
+            <v-switch v-model="form.douban_source" color="primary" inset>
+              <template #label><span class="ms-label">使用豆瓣音乐源搜索缺失曲目</span></template>
             </v-switch>
-            <p class="ms-hint">保存配置后会自动运行一次，随后开关自动复位。</p>
+            <p class="ms-hint">缺失曲目的搜索、识别、订阅都走宿主的官方音乐接口；
+              开启后额外带上豆瓣音乐源（中文曲库命中率更高），关闭则按宿主的音乐元数据源设置搜索。</p>
           </section>
 
           <v-divider />
@@ -92,7 +99,6 @@
 
           <section class="ms-section">
             <h3 class="ms-section__title">登录</h3>
-            <v-select v-model="form.login_type" :items="loginTypes" label="登录方式" />
             <div class="ms-login-state">
               <span :class="['ms-chip', loggedIn ? 'ms-chip--ok' : 'ms-chip--muted']">
                 <v-icon :icon="loggedIn ? 'mdi-account-music' : 'mdi-account-off'" size="14" />
@@ -102,42 +108,13 @@
                 :loading="logouting" @click="logout">退出登录</v-btn>
             </div>
 
-            <!-- 扫码登录 -->
-            <template v-if="form.login_type === 'qrcode'">
-              <v-btn class="mt-3" color="primary" variant="tonal" prepend-icon="mdi-qrcode" :loading="qrLoading"
-                @click="getQrcode">获取二维码</v-btn>
-              <div v-if="qrimg" class="ms-qr">
-                <img :src="qrimg" alt="网易云扫码二维码" />
-                <div class="ms-qr__tip">{{ qrMessage || '请使用网易云音乐 App 扫码' }}</div>
-              </div>
-            </template>
-
-            <!-- 验证码登录 -->
-            <template v-else-if="form.login_type === 'captcha'">
-              <v-text-field v-model="loginUser" label="手机号" placeholder="13800138000" />
-              <div class="ms-row">
-                <v-text-field v-model="loginCaptcha" class="ms-row__grow" label="验证码" />
-                <v-btn class="ms-row__btn" variant="tonal" :loading="sending" @click="sendCaptcha">发送验证码</v-btn>
-              </div>
-              <v-btn class="mt-2" color="primary" variant="tonal" prepend-icon="mdi-login" :loading="logining"
-                @click="doLogin">登录</v-btn>
-            </template>
-
-            <!-- 账号密码登录 -->
-            <template v-else-if="form.login_type === 'password'">
-              <v-text-field v-model="loginUser" label="手机号 / 邮箱" />
-              <v-text-field v-model="loginPassword" type="password" label="密码" />
-              <v-btn class="mt-2" color="primary" variant="tonal" prepend-icon="mdi-login" :loading="logining"
-                @click="doLogin">登录</v-btn>
-            </template>
-
-            <!-- Cookie 登录 -->
-            <template v-else>
-              <v-textarea v-model="loginCookie" rows="3" label="Cookie"
-                placeholder="粘贴包含 MUSIC_U 的网易云 Cookie" />
-              <v-btn class="mt-2" color="primary" variant="tonal" prepend-icon="mdi-login" :loading="logining"
-                @click="doLogin">用 Cookie 登录</v-btn>
-            </template>
+            <!-- 扫码登录（插件只提供这一种登录方式） -->
+            <v-btn class="mt-3" color="primary" variant="tonal" prepend-icon="mdi-qrcode" :loading="qrLoading"
+              @click="getQrcode">获取二维码</v-btn>
+            <div v-if="qrimg" class="ms-qr">
+              <img :src="qrimg" alt="网易云扫码二维码" />
+              <div class="ms-qr__tip">{{ qrMessage || '请使用网易云音乐 App 扫码' }}</div>
+            </div>
 
             <div v-if="loginResult" class="mt-3">
               <v-alert :type="loginResult.code === 0 ? 'success' : 'error'" density="compact" variant="tonal">
@@ -239,14 +216,12 @@
         @click="runOnce">立即运行一次</v-btn>
       <v-spacer />
       <v-btn variant="text" prepend-icon="mdi-format-list-bulleted" @click="emit('switch')">查看缺失清单</v-btn>
-      <v-btn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="saving"
-        @click="save">保存</v-btn>
     </footer>
   </section>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 const props = defineProps({
   initialConfig: { type: Object, default: () => ({}) },
@@ -259,15 +234,11 @@ const PLUGIN = 'plugin/MusicSubscribe'
 
 const DEFAULTS = {
   enabled: false,
-  onlyonce: false,
   cron: '',
   media_server: [],
   exact_match: true,
+  douban_source: true,
   ncm_api_url: '',
-  login_type: 'qrcode',
-  wylogin_user: '',
-  wylogin_password: '',
-  wylogin_cookie: '',
   wymusic_paths: '',
   wy_daily_list: false,
   wy_daily_song: false,
@@ -285,16 +256,11 @@ const form = reactive({ ...DEFAULTS })
 let baseline = JSON.stringify({ ...DEFAULTS })
 
 const mediaServers = ref([])
-const loginTypes = ref([])
 const username = ref('')
 const loggedIn = computed(() => !!username.value)
 const stats = ref({})
 
-// 登录区临时输入（不落配置，避免把验证码、密码写进插件配置）
-const loginUser = ref('')
-const loginPassword = ref('')
-const loginCaptcha = ref('')
-const loginCookie = ref('')
+// 扫码登录的结果提示（不落配置）
 const loginResult = ref(null)
 
 const qrimg = ref('')
@@ -305,8 +271,6 @@ let qrTimer = null
 
 const probeResult = ref(null)
 const probing = ref(false)
-const sending = ref(false)
-const logining = ref(false)
 const logouting = ref(false)
 const running = ref(false)
 
@@ -314,15 +278,6 @@ const addedTotal = computed(() =>
   (stats.value.playlists || []).reduce((sum, p) => sum + (p.added || 0), 0))
 
 const dirty = computed(() => JSON.stringify({ ...form }) !== baseline)
-
-// 跟着登录方式切换，把用户名回填到验证码 / 密码登录的输入框
-watch(() => form.login_type, (type) => {
-  qrimg.value = ''
-  stopQrPoll()
-  loginResult.value = null
-  if (type !== 'cookie' && !loginUser.value) loginUser.value = form.wylogin_user || ''
-  if (type === 'cookie' && !loginCookie.value) loginCookie.value = form.wylogin_cookie || ''
-})
 
 function call(method, path, data) {
   const fn = props?.api?.[method]
@@ -342,11 +297,8 @@ async function loadStatus() {
     form.media_server = Array.isArray(form.media_server) ? form.media_server : []
     baseline = JSON.stringify({ ...form })
     mediaServers.value = Array.isArray(res?.media_servers) ? res.media_servers : []
-    loginTypes.value = Array.isArray(res?.login_types) ? res.login_types : []
     username.value = res?.username || ''
     stats.value = res?.stats || {}
-    loginUser.value = form.wylogin_user || ''
-    loginCookie.value = form.wylogin_cookie || ''
     loaded.value = true
   } catch (e) {
     error.value = '加载插件状态失败：' + (e?.message || e)
@@ -447,55 +399,6 @@ async function refreshUsername() {
   }
 }
 
-async function sendCaptcha() {
-  if (!loginUser.value) {
-    loginResult.value = { code: 1, message: '请先填写手机号' }
-    return
-  }
-  sending.value = true
-  try {
-    // phone 是标量参数 → 走 query string
-    const res = await call('post', `${PLUGIN}/captcha/send?phone=${encodeURIComponent(loginUser.value)}`)
-    loginResult.value = { code: res?.code === 0 ? 0 : 1, message: res?.message || '验证码已发送' }
-  } catch (e) {
-    loginResult.value = { code: 1, message: '发送验证码失败：' + (e?.message || e) }
-  } finally {
-    sending.value = false
-  }
-}
-
-async function doLogin() {
-  logining.value = true
-  loginResult.value = null
-  try {
-    const body = {}
-    if (form.login_type === 'captcha') {
-      body.user = loginUser.value
-      body.captcha = loginCaptcha.value
-    } else if (form.login_type === 'password') {
-      body.user = loginUser.value
-      body.password = loginPassword.value
-      // 账号密码登录要把凭据写进配置才能在 Cookie 失效时自动续登
-      form.wylogin_user = loginUser.value
-      form.wylogin_password = loginPassword.value
-    } else {
-      body.cookie = loginCookie.value
-      form.wylogin_cookie = loginCookie.value
-    }
-    const res = await call('post', `${PLUGIN}/login`, body)
-    loginResult.value = { code: res?.code === 0 ? 0 : 1, message: res?.message || '' }
-    if (res?.code === 0) {
-      username.value = res.username || ''
-      loginCaptcha.value = ''
-      loginPassword.value = ''
-    }
-  } catch (e) {
-    loginResult.value = { code: 1, message: '登录失败：' + (e?.message || e) }
-  } finally {
-    logining.value = false
-  }
-}
-
 async function logout() {
   logouting.value = true
   try {
@@ -503,8 +406,8 @@ async function logout() {
     loginResult.value = { code: res?.code === 0 ? 0 : 1, message: res?.message || '已退出登录' }
     if (res?.code === 0) {
       username.value = ''
-      form.wylogin_cookie = ''
-      loginCookie.value = ''
+      qrimg.value = ''
+      stopQrPoll()
     }
   } catch (e) {
     loginResult.value = { code: 1, message: '退出登录失败：' + (e?.message || e) }

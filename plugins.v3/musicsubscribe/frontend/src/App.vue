@@ -61,15 +61,11 @@ const frameStyle = computed(() => ({ maxWidth: `${previewWidth.value}px` }))
 
 const mockConfig = {
   enabled: true,
-  onlyonce: false,
   cron: '0 4 * * *',
   media_server: ['Plex'],
   exact_match: true,
+  douban_source: true,
   ncm_api_url: 'http://192.168.1.100:1630',
-  login_type: 'qrcode',
-  wylogin_user: '',
-  wylogin_password: '',
-  wylogin_cookie: '',
   wymusic_paths: '123456789:我的收藏\n987654321:午后咖啡',
   wy_daily_list: false,
   wy_daily_song: false,

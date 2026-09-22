@@ -19,28 +19,21 @@ CONFIG_PREFIX = "music_"
 #: 宿主机映射端口统一用 1630（如 ``-p 1630:3000``）。
 DEFAULT_NCM_API_URL = "http://192.168.1.100:1630"
 
-#: 网易云登录方式
-LOGIN_TYPES: Tuple[Tuple[str, str], ...] = (
-    ("qrcode", "扫码登录"),
-    ("captcha", "手机验证码"),
-    ("password", "账号密码"),
-    ("cookie", "手动粘贴 Cookie"),
-)
+#: 缺失曲目搜索时可额外启用的音乐来源（豆瓣音乐）
+DOUBAN_SOURCE_VALUE = "doubanmusic"
+
 
 #: 默认配置
 DEFAULTS: Dict[str, Any] = {
     # 运行
     "enabled": False,
-    "onlyonce": False,
     "cron": "",
     "media_server": [],
     "exact_match": True,
+    # 缺失曲目订阅
+    "douban_source": True,
     # 网易云
     "ncm_api_url": DEFAULT_NCM_API_URL,
-    "login_type": "qrcode",
-    "wylogin_user": "",
-    "wylogin_password": "",
-    "wylogin_cookie": "",
     "wymusic_paths": "",
     "wy_daily_list": False,
     "wy_daily_song": False,
@@ -50,11 +43,10 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 #: 布尔配置项
-_BOOL_KEYS = ("enabled", "onlyonce", "exact_match", "wy_daily_list", "wy_daily_song")
+_BOOL_KEYS = ("enabled", "exact_match", "douban_source", "wy_daily_list", "wy_daily_song")
 #: 字符串配置项
 _STR_KEYS = (
-    "cron", "ncm_api_url", "login_type", "wylogin_user", "wylogin_password",
-    "wylogin_cookie", "wymusic_paths", "qqmusic_paths", "qishui_paths",
+    "cron", "ncm_api_url", "wymusic_paths", "qqmusic_paths", "qishui_paths",
 )
 
 
@@ -84,8 +76,6 @@ def normalize(config: Dict[str, Any] = None) -> Dict[str, Any]:
         servers = [item.strip() for item in servers.split(",") if item.strip()]
     if isinstance(servers, (list, tuple)):
         data["media_server"] = [str(item).strip() for item in servers if str(item).strip()]
-    if not any(data["login_type"] == item[0] for item in LOGIN_TYPES):
-        data["login_type"] = "qrcode"
     return data
 
 

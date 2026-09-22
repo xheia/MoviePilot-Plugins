@@ -38,25 +38,20 @@ const _hoisted_25 = { class: "ms-src" };
 const _hoisted_26 = { key: 0 };
 const _hoisted_27 = {
   key: 1,
-  class: "ms-done"
+  class: "ms-fail"
 };
-const _hoisted_28 = { key: 0 };
+const _hoisted_28 = { class: "col-dur" };
 const _hoisted_29 = {
-  key: 2,
-  class: "ms-done"
-};
-const _hoisted_30 = { class: "col-dur" };
-const _hoisted_31 = {
   key: 2,
   class: "ms-empty"
 };
-const _hoisted_32 = {
+const _hoisted_30 = {
   key: 2,
   class: "ms-pager"
 };
-const _hoisted_33 = { class: "ms-pager__info" };
-const _hoisted_34 = { class: "ms-foot" };
-const _hoisted_35 = { class: "ms-foot__count" };
+const _hoisted_31 = { class: "ms-pager__info" };
+const _hoisted_32 = { class: "ms-foot" };
+const _hoisted_33 = { class: "ms-foot__count" };
 
 const {computed,onMounted,reactive,ref,watch} = await importShared('vue');
 
@@ -84,7 +79,7 @@ const result = ref('');
 const resultLevel = ref('success');
 
 const items = ref([]);
-const summary = reactive({ total: 0, pending: 0, subscribed: 0 });
+const summary = reactive({ total: 0, failed: 0 });
 const stats = ref({});
 const targets = ref([{ value: 'song', label: '歌曲' }, { value: 'album', label: '专辑' }]);
 
@@ -100,9 +95,8 @@ const picks = reactive({});
 const syncMissing = computed(() => Number(stats.value?.missing) || 0);
 
 const statCards = computed(() => [
-  { key: 'all', label: '全部', count: summary.total },
-  { key: 'pending', label: '待订阅', count: summary.pending },
-  { key: 'subscribed', label: '已订阅', count: summary.subscribed },
+  { key: 'all', label: '待处理', count: summary.total },
+  { key: 'failed', label: '订阅失败', count: summary.failed },
 ]);
 
 const sourceOptions = computed(() => {
@@ -113,8 +107,7 @@ const sourceOptions = computed(() => {
 const rows = computed(() => {
   const kw = keyword.value.trim().toLowerCase();
   let list = items.value;
-  if (scope.value === 'pending') list = list.filter(i => !i.subscribed);
-  else if (scope.value === 'subscribed') list = list.filter(i => i.subscribed);
+  if (scope.value === 'failed') list = list.filter(i => !!(i.subscribe_message || ''));
   if (sourceFilter.value) list = list.filter(i => i.source === sourceFilter.value);
   if (kw) {
     list = list.filter(i =>
@@ -158,7 +151,7 @@ async function load() {
   try {
     const res = await call('get', `${PLUGIN}/pending?scope=${encodeURIComponent(scope.value)}`);
     items.value = Array.isArray(res?.items) ? res.items : [];
-    Object.assign(summary, res?.summary || { total: 0, pending: 0, subscribed: 0 });
+    Object.assign(summary, res?.summary || { total: 0, failed: 0 });
     stats.value = res?.stats || {};
     if (Array.isArray(res?.targets) && res.targets.length) targets.value = res.targets;
     const alive = new Set(items.value.map(i => Number(i.seq)));
@@ -209,9 +202,10 @@ async function subscribePicked() {
     const res = await call('post', `${PLUGIN}/pending/subscribe`, { items: payload });
     if (res?.code === 0) {
       const failed = (res.results || []).filter(r => !r.ok);
+      const detail = failed.map(f => `${f.title}（${f.message}）`).slice(0, 3).join('；');
       resultLevel.value = failed.length ? 'warning' : 'success';
       result.value = failed.length
-        ? `订阅完成，${failed.length} 条失败：${failed.map(f => `${f.title}（${f.message}）`).slice(0, 3).join('；')}`
+        ? `订阅完成：${payload.length - failed.length} 条已推送订阅并从清单移除，${failed.length} 条失败：${detail}`
         : (res.message || '订阅完成');
       clearPick();
       await load();
@@ -466,7 +460,7 @@ return (_ctx, _cache) => {
                     (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(pagedRows.value, (row) => {
                       return (_openBlock(), _createElementBlock("tr", {
                         key: row.seq,
-                        class: _normalizeClass({ 'ms-row--done': row.subscribed })
+                        class: _normalizeClass({ 'ms-row--fail': row.subscribe_message })
                       }, [
                         _createElementVNode("td", _hoisted_18, _toDisplayString(row.seq), 1),
                         _createElementVNode("td", _hoisted_19, [
@@ -492,20 +486,12 @@ return (_ctx, _cache) => {
                             (row.hits > 1)
                               ? (_openBlock(), _createElementBlock("span", _hoisted_26, " · 命中 " + _toDisplayString(row.hits) + " 次", 1))
                               : _createCommentVNode("", true),
-                            (row.subscribed)
-                              ? (_openBlock(), _createElementBlock("span", _hoisted_27, [
-                                  _createTextVNode(" · 已订阅" + _toDisplayString(row.subscribe_type === 'album' ? '专辑' : '歌曲') + " ", 1),
-                                  (row.subscribe_time)
-                                    ? (_openBlock(), _createElementBlock("span", _hoisted_28, "（" + _toDisplayString(row.subscribe_time) + "）", 1))
-                                    : _createCommentVNode("", true)
-                                ]))
-                              : _createCommentVNode("", true),
-                            (row.subscribed && row.subscribe_message)
-                              ? (_openBlock(), _createElementBlock("span", _hoisted_29, " · " + _toDisplayString(row.subscribe_message), 1))
+                            (row.subscribe_message)
+                              ? (_openBlock(), _createElementBlock("span", _hoisted_27, " · 上次订阅失败：" + _toDisplayString(row.subscribe_message), 1))
                               : _createCommentVNode("", true)
                           ])
                         ]),
-                        _createElementVNode("td", _hoisted_30, _toDisplayString(row.duration_text || '-'), 1),
+                        _createElementVNode("td", _hoisted_28, _toDisplayString(row.duration_text || '-'), 1),
                         _createElementVNode("td", null, _toDisplayString(row.artist || '-'), 1),
                         _createElementVNode("td", null, _toDisplayString(row.album || '-'), 1)
                       ], 2))
@@ -524,11 +510,11 @@ return (_ctx, _cache) => {
                     ]))]),
                     _: 1
                   }))
-                : (_openBlock(), _createElementBlock("div", _hoisted_31, " 清单是空的 —— 先跑一次歌单同步，媒体库里搜不到的曲目会出现在这里。 "))
+                : (_openBlock(), _createElementBlock("div", _hoisted_29, " 清单是空的 —— 先跑一次歌单同步，媒体库里搜不到的曲目会出现在这里。 "))
           ], 64))
     ]),
     (rows.value.length)
-      ? (_openBlock(), _createElementBlock("div", _hoisted_32, [
+      ? (_openBlock(), _createElementBlock("div", _hoisted_30, [
           _createVNode(_component_v_select, {
             modelValue: pageSize.value,
             "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((pageSize).value = $event)),
@@ -539,7 +525,7 @@ return (_ctx, _cache) => {
             label: "每页",
             class: "ms-pager__size"
           }, null, 8, ["modelValue"]),
-          _createElementVNode("span", _hoisted_33, "第 " + _toDisplayString(page.value) + " / " + _toDisplayString(Math.max(1, pageCount.value)) + " 页 · 共 " + _toDisplayString(rows.value.length) + " 条", 1),
+          _createElementVNode("span", _hoisted_31, "第 " + _toDisplayString(page.value) + " / " + _toDisplayString(Math.max(1, pageCount.value)) + " 页 · 共 " + _toDisplayString(rows.value.length) + " 条", 1),
           _createVNode(_component_v_btn, {
             size: "small",
             variant: "text",
@@ -564,8 +550,8 @@ return (_ctx, _cache) => {
           }, 8, ["disabled"])
         ]))
       : _createCommentVNode("", true),
-    _createElementVNode("footer", _hoisted_34, [
-      _createElementVNode("span", _hoisted_35, "已勾选 " + _toDisplayString(pickedCount.value) + " 条（歌曲 " + _toDisplayString(countByTarget.value.song) + " / 专辑 " + _toDisplayString(countByTarget.value.album) + "）", 1),
+    _createElementVNode("footer", _hoisted_32, [
+      _createElementVNode("span", _hoisted_33, "已勾选 " + _toDisplayString(pickedCount.value) + " 条（歌曲 " + _toDisplayString(countByTarget.value.song) + " / 专辑 " + _toDisplayString(countByTarget.value.album) + "）", 1),
       _createVNode(_component_v_spacer),
       _createVNode(_component_v_menu, { location: "top" }, {
         activator: _withCtx(({ props: menuProps }) => [
@@ -583,8 +569,8 @@ return (_ctx, _cache) => {
           _createVNode(_component_v_list, { density: "compact" }, {
             default: _withCtx(() => [
               _createVNode(_component_v_list_item, {
-                title: "清理已订阅记录",
-                onClick: _cache[9] || (_cache[9] = $event => (clearPending('subscribed')))
+                title: "清理订阅失败记录",
+                onClick: _cache[9] || (_cache[9] = $event => (clearPending('failed')))
               }),
               _createVNode(_component_v_list_item, {
                 title: "清空整个清单",
@@ -628,6 +614,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const PageComponent = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-4b456040"]]);
+const PageComponent = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-f8c5179a"]]);
 
 export { PageComponent as default };

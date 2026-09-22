@@ -2,7 +2,8 @@
 
 同步时媒体库里搜不到的曲目统一登记到这份清单里，跨歌单按「歌手 + 歌名」去重，
 重复命中只累加次数。清单在插件数据页展示，用户逐行选择「歌曲」或「专辑」后
-一次性推送订阅；订阅结果回写到同一条记录上，不做自动订阅。
+一次性推送订阅；订阅成功的行直接从清单移除（订阅本身去宿主的订阅列表里看），
+失败的行保留并在该行标出原因，不做自动订阅。
 """
 
 from __future__ import annotations
@@ -97,10 +98,7 @@ class PendingStore:
                 "hits": hits,
                 "first_time": now,
                 "last_time": now,
-                "subscribed": False,
-                "subscribe_type": "",
-                "subscribe_id": 0,
-                "subscribe_time": "",
+                # 订阅成功后该行会直接从清单移除，这里只记录最近一次失败的原因
                 "subscribe_message": "",
             }
             records.append(record)
@@ -161,21 +159,20 @@ class PendingStore:
         return len(records) - len(kept)
 
     def clear(self, scope: str = "all") -> int:
-        """清理清单：``all`` 全部 / ``subscribed`` 仅已订阅。"""
+        """清理清单：``all`` 全部 / ``failed`` 仅订阅失败的记录。"""
         records = self.records()
-        if str(scope).lower() == "subscribed":
-            kept = [item for item in records if not item.get("subscribed")]
+        if str(scope).lower() == "failed":
+            kept = [item for item in records if not (item.get("subscribe_message") or "")]
         else:
             kept = []
         self.save(kept)
         return len(records) - len(kept)
 
     def summary(self) -> Dict[str, int]:
-        """清单概览：总数、待订阅数与已订阅数。"""
+        """清单概览：总条数与其中订阅失败的条数（订阅成功即移出清单）。"""
         records = self.records()
-        subscribed = len([item for item in records if item.get("subscribed")])
+        failed = len([item for item in records if (item.get("subscribe_message") or "")])
         return {
             "total": len(records),
-            "pending": len(records) - subscribed,
-            "subscribed": subscribed,
+            "failed": failed,
         }
