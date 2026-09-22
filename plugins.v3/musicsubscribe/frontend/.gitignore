@@ -1,0 +1,9 @@
+node_modules/
+.vite/
+*.local
+
+# `npm run build` 顺带打出来的本地开发壳产物：宿主只加载下面几类联邦文件，
+# 这些 index-* / date-* 是 preview 用不到的，不入库
+dist/index.html
+dist/assets/index-*
+dist/assets/date-*
