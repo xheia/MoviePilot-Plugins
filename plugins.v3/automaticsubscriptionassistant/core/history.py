@@ -1,53 +1,39 @@
-"""历史存储：封装插件 KV 读写并维护去重集合。
+"""历史存储：读写插件自有表 ``subscribe_history``。
 
-存储 key 固定 ``'history'``，值为 ``List[dict]``。构造时从 KV 载入并重建去重集合，
-写入内存后由 ``flush()`` 统一落盘，降低 KV 写频率。
+每个操作各自开事务、按行读写，写入即提交。历史记录曾整体存放在插件 KV 的单个值里，
+那种形态下每个调用方都持有一份全量快照、落盘时整体覆盖，两个来源同时运行或用户在
+运行期间删记录，后提交者会把先提交者的改动整体抹掉；按行读写不再有这个问题，查询与
+分页也交给 SQL，不必把全表载入内存。
 
-V3 专用实现：载入时对存量数据做一次幂等的统一身份迁移（V2 记录只存
-``tmdbid``/``doubanid``/``bangumiid``，V3 只保存 ``media_source``/``media_id``），
-迁移结果与磁盘内容不同时才回写，因此重复加载是安全的空操作。
+筛选与排序全部下推 SQL：``time`` 是 ``"%Y-%m-%d %H:%M:%S"`` 文本、字典序即时间序，
+可直接排序；发行年份区间比较 ``year_num`` 整数列，不对文本列做 CAST。
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
-from .models import migrate_history_record
+from sqlalchemy import func, inspect, text
+from sqlalchemy.exc import IntegrityError
+
+from .models import _legacy_source_identity, _normalize_media_identity
+from .tables import Base, SubscribeHistory
 
 if TYPE_CHECKING:
     from .models import HistoryRecord
 
-# 插件 KV 中历史记录的固定键。
+# 历史记录在迁移前所用的插件 KV 键，仅存量迁移时读取。
 HISTORY_KEY = "history"
 
 # 「已处理」正向终态：命中即可跨渠道/跨运行跳过识别。被过滤/未识别/异常者不入此集合，
 # 仍可被其他渠道或下一轮重试（避免漏订）。取值为 SubscribeStatus.value。
 HANDLED_STATUSES = frozenset({"subscribed", "media_exists", "subscription_exists"})
 
+# 单次查询允许返回的最大条数，挡住超大 count 造成的巨型响应。
+MAX_PAGE_SIZE = 500
 
-def _handled_uniques(records: List[dict]) -> set:
-    """从记录集合重建已处理去重键集合（仅正向终态）。"""
-    return {r.get("unique") for r in records
-            if r.get("unique") and r.get("status") in HANDLED_STATUSES}
-
-
-def _migrate_records(records: List[dict]) -> List[dict]:
-    """把存量记录迁移到 V3 统一身份字段，并按身份键去重保留最后一条。
-
-    身份键可能因迁移由旧格式升级为新格式，同一条媒体的新旧记录会折叠为一条，
-    避免历史里出现重复条目。
-    """
-    migrated: List[dict] = []
-    seen: dict = {}
-    for record in records:
-        item = migrate_history_record(record)
-        key = item.get("unique")
-        if key and key in seen:
-            migrated[seen[key]] = item
-            continue
-        if key:
-            seen[key] = len(migrated)
-        migrated.append(item)
-    return migrated
+# 已确保建过表的 engine，避免每次构造都往数据库发一轮存在性检查。
+_PREPARED_ENGINES: set = set()
 
 
 def _multi(value) -> Optional[set]:
@@ -78,54 +64,171 @@ def _to_int(value) -> Optional[int]:
         return None
 
 
-def _year_in_range(year, ymin: Optional[int], ymax: Optional[int]) -> bool:
-    """发行年份闭区间判断；无区间约束恒真；年份不可解析且有约束时判否。"""
-    if ymin is None and ymax is None:
-        return True
-    y = _to_int(year)
-    if y is None:
-        return False
-    if ymin is not None and y < ymin:
-        return False
-    if ymax is not None and y > ymax:
-        return False
-    return True
+def ensure_schema(engine) -> None:
+    """按需建表，可重复调用。
+
+    宿主在 ``init_plugin`` 之后才按 ``get_database_models()`` 建表，而插件在
+    ``init_plugin`` 期间就可能读写历史，故存储层自带这道幂等兜底。
+
+    :param engine: 插件自有库的 engine
+    """
+    key = id(engine)
+    if key in _PREPARED_ENGINES:
+        return
+    Base.metadata.create_all(engine, checkfirst=True)
+    _migrate_history_columns(engine)
+    _PREPARED_ENGINES.add(key)
+
+
+def _migrate_history_columns(engine) -> None:
+    """为已经存在的历史表补齐 v3 身份字段并回填主身份。
+
+    插件表没有宿主 Alembic 迁移链，``create_all`` 不会给旧表增加列。这里仅对
+    固定的插件表名执行逐列 ``ALTER TABLE ... ADD COLUMN``，新安装和已有安装都
+    能安全启动。旧表中的 tmdb/douban/bangumi 以及早期临时增加过的单源列只在
+    迁移时读取一次，统一回填到 ``media_source/media_id``，新 schema 不再声明这些
+    按来源增长的列。
+    """
+    table = SubscribeHistory.__table__
+    existing = {column["name"] for column in inspect(engine).get_columns(table.name)}
+    missing = [column for column in table.columns if column.name not in existing]
+    quoted_table = engine.dialect.identifier_preparer.quote(table.name)
+    with engine.begin() as connection:
+        for column in missing:
+            quoted_column = engine.dialect.identifier_preparer.quote(column.name)
+            column_type = column.type.compile(dialect=engine.dialect)
+            connection.execute(text(
+                f"ALTER TABLE {quoted_table} ADD COLUMN {quoted_column} {column_type}"
+            ))
+        existing.update(column.name for column in missing)
+        _backfill_media_identity(connection, engine, quoted_table, existing)
+
+
+def _backfill_media_identity(connection, engine, quoted_table: str,
+                             columns: set[str]) -> None:
+    """将旧版分散 ID 一次性转换为通用身份，不把旧列带入新 ORM 模型。"""
+    legacy_columns = (
+        "tmdbid", "doubanid", "bangumiid", "anilistid", "imdbid", "tvdbid",
+    )
+    available = [name for name in legacy_columns if name in columns]
+    if "id" not in columns or "media_source" not in columns or "media_id" not in columns:
+        return
+    if not available:
+        return
+
+    quoted_columns = ", ".join(
+        engine.dialect.identifier_preparer.quote(name) for name in ("id", "media_source", "media_id", *available)
+    )
+    rows = connection.execute(text(
+        f"SELECT {quoted_columns} FROM {quoted_table}"
+    )).mappings()
+    quoted_source = engine.dialect.identifier_preparer.quote("media_source")
+    quoted_id = engine.dialect.identifier_preparer.quote("media_id")
+    quoted_pk = engine.dialect.identifier_preparer.quote("id")
+    update_sql = text(
+        f"UPDATE {quoted_table} SET {quoted_source} = :media_source, "
+        f"{quoted_id} = :media_id WHERE {quoted_pk} = :row_id"
+    )
+    for row in rows:
+        current_source, current_id = _normalize_media_identity(
+            row.get("media_source"), row.get("media_id"))
+        if current_source and current_id:
+            continue
+        source, media_id = _legacy_source_identity(
+            tmdb_id=row.get("tmdbid"),
+            douban_id=row.get("doubanid"),
+            bangumi_id=row.get("bangumiid"),
+            # 这些字段只为兼容此前开发版本已经生成的数据库列；不会进入新模型。
+            anilist_id=row.get("anilistid"),
+            imdb_id=row.get("imdbid"),
+            tvdb_id=row.get("tvdbid"),
+        )
+        if source and media_id:
+            connection.execute(update_sql, {
+                "media_source": getattr(source, "value", source),
+                "media_id": media_id,
+                "row_id": row.get("id"),
+            })
 
 
 class HistoryStore:
-    """历史记录仓库 + 去重键集合。"""
+    """历史记录仓库。"""
 
-    def __init__(self, get_data, save_data, del_data):
-        # get_data/save_data/del_data 为 _PluginBase 的绑定方法。
-        raw = list(get_data(HISTORY_KEY) or [])
-        self._records: List[dict] = _migrate_records(raw)
-        self._handled = _handled_uniques(self._records)
-        self._save = save_data
-        self._del = del_data
-        # 迁移结果与磁盘不一致才回写：迁移是幂等的，重复加载不会反复写 KV。
-        if self._records != raw:
-            self._save(HISTORY_KEY, self._records)
+    def __init__(self, session_factory):
+        """
+        :param session_factory: 无参可调用，每次返回一个新的 SQLAlchemy 会话
+        """
+        self._session_factory = session_factory
+        # 本实例内显式标记过的身份键。正向终态本身由记录的 status 表达，此集合只覆盖
+        # 「标记了但还没落一条记录」的调用顺序，不承担持久化职责。
+        self._marked: set = set()
+        self._schema_ready = False
+
+    @contextmanager
+    def _session(self):
+        """开一个会话，正常结束即提交，异常回滚，最后必定关闭。"""
+        session = self._session_factory()
+        if not self._schema_ready:
+            ensure_schema(session.get_bind())
+            self._schema_ready = True
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     def is_handled(self, key: str) -> bool:
         """去重键是否已处理过（正向终态）。"""
-        return key in self._handled
+        if not key:
+            return False
+        if key in self._marked:
+            return True
+        with self._session() as session:
+            return bool(session.query(
+                session.query(SubscribeHistory)
+                .filter(SubscribeHistory.unique == key,
+                        SubscribeHistory.status.in_(tuple(HANDLED_STATUSES)))
+                .exists()
+            ).scalar())
 
     def mark_handled(self, key: str) -> None:
         """标记去重键为已处理（由 executor 对正向终态显式调用）。"""
-        self._handled.add(key)
+        if key:
+            self._marked.add(key)
 
     def record(self, rec: "HistoryRecord") -> None:
-        """写入一条记录：同 unique（媒体身份键）先移除旧的再追加，跨渠道自动合并为一条。
+        """写入一条记录：同 unique（媒体身份键）覆盖旧的，跨渠道自动合并为一条。
 
-        注意：本方法**不**修改已处理集合——是否「已处理」由 executor 依据终态显式
-        ``mark_handled``，以便被过滤/未识别的条目照常留一条但仍可被其他渠道重试。
+        注意：本方法**不**影响是否「已处理」的判定——那取决于记录的 ``status``，
+        以便被过滤/未识别的条目照常留一条但仍可被其他渠道重试。
         """
-        self._records = [r for r in self._records if r.get("unique") != rec.unique]
-        self._records.append(rec.to_dict())
+        values = rec.to_dict()
+        values["year_num"] = _to_int(values.get("year"))
+        try:
+            with self._session() as session:
+                self._upsert(session, values)
+        except IntegrityError:
+            # 另一个并发写入抢先插入了同一 unique，改按更新重试一次。
+            with self._session() as session:
+                self._upsert(session, values)
+
+    @staticmethod
+    def _upsert(session, values: dict) -> None:
+        """按 unique 插入或更新一行。"""
+        row = (session.query(SubscribeHistory)
+               .filter(SubscribeHistory.unique == values["unique"])
+               .one_or_none())
+        if row is None:
+            session.add(SubscribeHistory(**values))
+            return
+        for field, value in values.items():
+            setattr(row, field, value)
 
     def flush(self) -> None:
-        """把内存记录整体落盘。"""
-        self._save(HISTORY_KEY, self._records)
+        """兼容旧调用点的空操作：写入在 ``record()`` 内即已提交。"""
 
     def query(self, provider: Optional[str] = None, status: Optional[str] = None,
               mtype: Optional[str] = None, keyword: Optional[str] = None,
@@ -134,74 +237,150 @@ class HistoryStore:
         """按 provider/status/type/关键词/发行年份范围 过滤并分页（按 time 倒序），返回(切片, 总数)。
 
         provider/status/mtype 支持逗号分隔多值（如 ``"douban,maoyan"``）；单值向后兼容。
-        year_min/year_max 为发行年份闭区间（留空不约束）。
-        keyword 对标题做不区分大小写的子串匹配。
+        year_min/year_max 为发行年份闭区间（留空不约束），解析不出年份的记录在有区间
+        约束时不入选。keyword 对标题做不区分大小写的子串匹配。
         """
-        kw = (keyword or "").strip().lower()
+        page = max(_to_int(page) or 1, 1)
+        count = min(max(_to_int(count) or 1, 1), MAX_PAGE_SIZE)
+        with self._session() as session:
+            query = self._filtered(session, provider, status, mtype, keyword,
+                                   year_min, year_max)
+            total = query.count()
+            rows = (query.order_by(SubscribeHistory.time.desc(),
+                                   SubscribeHistory.id.desc())
+                    .offset((page - 1) * count).limit(count).all())
+            return [r.to_dict() for r in rows], total
+
+    @staticmethod
+    def _filtered(session, provider, status, mtype, keyword, year_min, year_max):
+        """按各筛选条件组装查询。"""
+        query = session.query(SubscribeHistory)
         providers = _multi(provider)
+        if providers is not None:
+            query = query.filter(SubscribeHistory.provider.in_(tuple(providers)))
         statuses = _multi(status)
+        if statuses is not None:
+            query = query.filter(SubscribeHistory.status.in_(tuple(statuses)))
         mtypes = _multi(mtype)
+        if mtypes is not None:
+            query = query.filter(SubscribeHistory.type.in_(tuple(mtypes)))
+        kw = (keyword or "").strip().lower()
+        if kw:
+            # 两端都转小写再匹配，不依赖各数据库 LIKE 默认的大小写敏感性。
+            query = query.filter(func.lower(SubscribeHistory.title).like(f"%{kw}%"))
         ymin = _to_int(year_min)
         ymax = _to_int(year_max)
-        filtered = [
-            r for r in self._records
-            if (providers is None or r.get("provider") in providers)
-            and (statuses is None or r.get("status") in statuses)
-            and (mtypes is None or r.get("type") in mtypes)
-            and (not kw or kw in (r.get("title") or "").lower())
-            and _year_in_range(r.get("year"), ymin, ymax)
-        ]
-        filtered.sort(key=lambda r: r.get("time") or "", reverse=True)
-        total = len(filtered)
-        page = max(int(page or 1), 1)
-        count = max(int(count or 1), 1)
-        start = (page - 1) * count
-        return filtered[start:start + count], total
+        if ymin is not None or ymax is not None:
+            query = query.filter(SubscribeHistory.year_num.isnot(None))
+            if ymin is not None:
+                query = query.filter(SubscribeHistory.year_num >= ymin)
+            if ymax is not None:
+                query = query.filter(SubscribeHistory.year_num <= ymax)
+        return query
+
+    def uniques(self, provider: Optional[str] = None, status: Optional[str] = None,
+                mtype: Optional[str] = None, keyword: Optional[str] = None,
+                year_min=None, year_max=None) -> List[str]:
+        """按同一套筛选条件取全部身份键，供「选全部」一次取齐。
+
+        只取一列，不受分页上限约束：前端全选要的是键集合，拉整行记录既浪费又会被
+        单页上限截断。
+        """
+        with self._session() as session:
+            query = self._filtered(session, provider, status, mtype, keyword,
+                                   year_min, year_max)
+            return [row.unique for row in
+                    query.with_entities(SubscribeHistory.unique).all()]
 
     def get(self, unique: str) -> Optional[dict]:
         """按 unique 取一条记录（未找到返回 None），供「重新识别」还原候选。"""
-        return next((r for r in self._records if r.get("unique") == unique), None)
+        if not unique:
+            return None
+        with self._session() as session:
+            row = (session.query(SubscribeHistory)
+                   .filter(SubscribeHistory.unique == unique).one_or_none())
+            return row.to_dict() if row is not None else None
 
     def delete(self, unique: str) -> bool:
-        """删除指定 unique 的记录并落盘，同时从去重集合移除。"""
-        before = len(self._records)
-        self._records = [r for r in self._records if r.get("unique") != unique]
-        removed = len(self._records) != before
-        self._handled.discard(unique)
-        if removed:
-            self.flush()
-        return removed
+        """删除指定 unique 的记录。"""
+        if not unique:
+            return False
+        self._marked.discard(unique)
+        with self._session() as session:
+            removed = (session.query(SubscribeHistory)
+                       .filter(SubscribeHistory.unique == unique)
+                       .delete(synchronize_session=False))
+        return bool(removed)
 
     def delete_many(self, uniques) -> int:
-        """批量删除多条记录，仅一次落盘。返回实际删除条数。"""
+        """批量删除多条记录。返回实际删除条数。"""
         targets = {u for u in (uniques or []) if u}
         if not targets:
             return 0
-        before = len(self._records)
-        self._records = [r for r in self._records if r.get("unique") not in targets]
-        removed = before - len(self._records)
-        self._handled -= targets
-        if removed:
-            self.flush()
-        return removed
+        self._marked -= targets
+        with self._session() as session:
+            return (session.query(SubscribeHistory)
+                    .filter(SubscribeHistory.unique.in_(tuple(targets)))
+                    .delete(synchronize_session=False))
 
     def clear(self, provider: Optional[str] = None) -> None:
-        """清空全部或某来源的历史，并落盘。"""
-        if provider is None:
-            self._records = []
-            self._handled = set()
-        else:
-            self._records = [r for r in self._records if r.get("provider") != provider]
-            self._handled = _handled_uniques(self._records)
-        self.flush()
+        """清空全部或某来源的历史。"""
+        self._marked = set()
+        with self._session() as session:
+            query = session.query(SubscribeHistory)
+            if provider is not None:
+                query = query.filter(SubscribeHistory.provider == provider)
+            query.delete(synchronize_session=False)
 
     def stats(self) -> dict:
         """统计各 provider / 各 status 计数。"""
-        by_provider: dict = {}
-        by_status: dict = {}
-        for r in self._records:
-            provider = r.get("provider") or "unknown"
-            status = r.get("status") or "unknown"
-            by_provider[provider] = by_provider.get(provider, 0) + 1
-            by_status[status] = by_status.get(status, 0) + 1
-        return {"total": len(self._records), "by_provider": by_provider, "by_status": by_status}
+        with self._session() as session:
+            by_provider = {
+                (p or "unknown"): n for p, n in
+                session.query(SubscribeHistory.provider,
+                              func.count(SubscribeHistory.id))
+                .group_by(SubscribeHistory.provider).all()
+            }
+            by_status = {
+                (s or "unknown"): n for s, n in
+                session.query(SubscribeHistory.status,
+                              func.count(SubscribeHistory.id))
+                .group_by(SubscribeHistory.status).all()
+            }
+            total = session.query(func.count(SubscribeHistory.id)).scalar() or 0
+        return {"total": total, "by_provider": by_provider, "by_status": by_status}
+
+    def count(self) -> int:
+        """历史记录总数。"""
+        with self._session() as session:
+            return session.query(func.count(SubscribeHistory.id)).scalar() or 0
+
+    def prune(self, keep: int) -> int:
+        """只保留最近 ``keep`` 条历史，删除更早的记录。返回删除条数。
+
+        ``keep`` 非正数时不做任何删除。
+
+        :param keep: 保留条数
+        """
+        keep = _to_int(keep) or 0
+        if keep <= 0:
+            return 0
+        with self._session() as session:
+            kept = [row.id for row in
+                    session.query(SubscribeHistory.id)
+                    .order_by(SubscribeHistory.time.desc(),
+                              SubscribeHistory.id.desc())
+                    .limit(keep).all()]
+            if not kept:
+                return 0
+            return (session.query(SubscribeHistory)
+                    .filter(SubscribeHistory.id.notin_(tuple(kept)))
+                    .delete(synchronize_session=False))
+
+    def values(self) -> List[dict]:
+        """全部记录（按 time 倒序），供导出与存量比对。"""
+        with self._session() as session:
+            rows = (session.query(SubscribeHistory)
+                    .order_by(SubscribeHistory.time.desc(),
+                              SubscribeHistory.id.desc()).all())
+            return [r.to_dict() for r in rows]

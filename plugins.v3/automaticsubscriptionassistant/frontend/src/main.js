@@ -22,4 +22,4 @@ const app = createApp(App)
 app.use(vuetify)
 
 // 挂载应用
-app.mount('#app')
+app.mount('#app') 

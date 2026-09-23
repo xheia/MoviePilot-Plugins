@@ -171,7 +171,7 @@
                       v-model="config.providers[activeGroup].cron"
                       class="asa-control"
                       density="compact"
-                      hide-details
+                      :error-messages="activeCronError"
                       :placeholder="activeSpec.default_cron || '0 8 * * *'"
                       variant="outlined"
                     />
@@ -385,11 +385,14 @@ const MSG = {
     'g.notify.label': '运行通知', 'g.notify.hint': '每次运行后发送消息通知',
     'g.username.label': '订阅用户名', 'g.username.hint': '订阅记录归属的用户名',
     'g.exist_ok.label': '媒体库已存在仍订阅', 'g.exist_ok.hint': '媒体库已有资源时仍允许添加订阅',
+    'g.history_keep.label': '历史保留条数', 'g.history_keep.hint': '每轮运行后只保留最近若干条历史，0 表示不限制',
+    secHistory: '历史记录',
     'g.onlyonce.label': '保存后立即运行一次', 'g.onlyonce.hint': '保存后运行所有启用来源一次，随后自动复位',
     'g.clear.label': '清空历史记录', 'g.clear.hint': '保存后清空全部订阅历史，随后自动复位',
     provEnabled: '已启用 · 按下方定时规则自动运行', provDisabled: '未启用 · 打开开关后加入定时调度',
     secSourceSchedule: '来源与调度', enableSource: '启用该来源', enableSourceHint: '关闭后不为该来源注册定时任务',
     cronLabel: '定时规则', cronHint: '五位 cron 表达式，缺省取来源默认值',
+    cronInvalid: '定时表达式格式不正确，应为五段',
     secOptions: '抓取选项', secFilters: '过滤条件', advanced: '高级选项', advancedHint: '默认隐藏，谨慎修改',
     runNow: '立即运行一次', runTriggered: '已触发，将在 3 秒后运行', runFailed: '触发失败：', apiUnavailable: 'API 不可用',
     testConn: '连通性测试', testOk: '连通正常', testFail: '连通失败：', throttled: '操作过于频繁，请稍后再试',
@@ -409,11 +412,14 @@ const MSG = {
     'g.notify.label': '執行通知', 'g.notify.hint': '每次執行後傳送訊息通知',
     'g.username.label': '訂閱使用者名稱', 'g.username.hint': '訂閱記錄歸屬的使用者名稱',
     'g.exist_ok.label': '媒體庫已存在仍訂閱', 'g.exist_ok.hint': '媒體庫已有資源時仍允許新增訂閱',
+    'g.history_keep.label': '歷史保留筆數', 'g.history_keep.hint': '每輪執行後只保留最近若干筆歷史，0 表示不限制',
+    secHistory: '歷史記錄',
     'g.onlyonce.label': '儲存後立即執行一次', 'g.onlyonce.hint': '儲存後執行所有啟用來源一次，隨後自動復位',
     'g.clear.label': '清空歷史記錄', 'g.clear.hint': '儲存後清空全部訂閱歷史，隨後自動復位',
     provEnabled: '已啟用 · 按下方定時規則自動執行', provDisabled: '未啟用 · 開啟開關後加入定時排程',
     secSourceSchedule: '來源與排程', enableSource: '啟用此來源', enableSourceHint: '關閉後不為此來源註冊定時任務',
     cronLabel: '定時規則', cronHint: '五位 cron 運算式，缺省取來源預設值',
+    cronInvalid: '定時運算式格式不正確，應為五段',
     secOptions: '抓取選項', secFilters: '過濾條件', advanced: '進階選項', advancedHint: '預設隱藏，謹慎修改',
     runNow: '立即執行一次', runTriggered: '已觸發，將在 3 秒後執行', runFailed: '觸發失敗：', apiUnavailable: 'API 不可用',
     testConn: '連通性測試', testOk: '連通正常', testFail: '連通失敗：', throttled: '操作過於頻繁，請稍後再試',
@@ -433,11 +439,14 @@ const MSG = {
     'g.notify.label': 'Run notifications', 'g.notify.hint': 'Send a message after each run',
     'g.username.label': 'Subscription user', 'g.username.hint': 'User the subscription records belong to',
     'g.exist_ok.label': 'Subscribe even if in library', 'g.exist_ok.hint': 'Allow adding subscriptions even when already in the library',
+    'g.history_keep.label': 'History retention', 'g.history_keep.hint': 'Keep only the most recent N history entries after each run; 0 means unlimited',
+    secHistory: 'History',
     'g.onlyonce.label': 'Run once after saving', 'g.onlyonce.hint': 'Run all enabled sources once after saving, then auto-reset',
     'g.clear.label': 'Clear history', 'g.clear.hint': 'Clear all subscription history after saving, then auto-reset',
     provEnabled: 'Enabled · runs automatically on the schedule below', provDisabled: 'Disabled · turn on to add to the scheduler',
     secSourceSchedule: 'Source & schedule', enableSource: 'Enable this source', enableSourceHint: 'Off: no scheduled task is registered for this source',
     cronLabel: 'Schedule', cronHint: 'Five-field cron expression; empty uses the source default',
+    cronInvalid: 'Invalid cron expression; five fields are required',
     secOptions: 'Fetch options', secFilters: 'Filters', advanced: 'Advanced', advancedHint: 'Hidden by default; edit with care',
     runNow: 'Run once now', runTriggered: 'Triggered; will run in 3s', runFailed: 'Trigger failed: ', apiUnavailable: 'API unavailable',
     testConn: 'Test connection', testOk: 'Connected', testFail: 'Connection failed: ', throttled: 'Too frequent, please retry later',
@@ -469,6 +478,7 @@ const GLOBAL_DEFAULTS = { enabled: false, notify: false, exist_ok: true, usernam
 const GLOBAL_SECTIONS = [
   { titleKey: 'secRunning', fields: [{ key: 'enabled', kind: 'switch' }, { key: 'notify', kind: 'switch' }] },
   { titleKey: 'secSubscription', fields: [{ key: 'username', kind: 'text' }, { key: 'exist_ok', kind: 'switch' }] },
+  { titleKey: 'secHistory', fields: [{ key: 'history_keep', kind: 'number' }] },
   { titleKey: 'secOneTime', fields: [{ key: 'onlyonce', kind: 'switch' }, { key: 'clear', kind: 'switch' }] },
 ]
 const PROVIDER_ICONS = {
@@ -538,14 +548,20 @@ const summaryState = ref('loading') // loading | available | unavailable
 const stats = ref(null)
 const runState = ref([]) // [{provider_id, name, processed, started}]（运行中的来源）
 let pollTimer = null
+// 轮询靠自身重排，只在卸载时 clearTimeout 拦不住它：若卸载发生在请求挂起期间，
+// 响应回来后还会再排一次，留下一个谁也管不到的孤儿循环。故用此标记一并封住重排入口。
+let disposed = false
 function armPoll(ms) {
   clearTimeout(pollTimer)
+  if (disposed) return
   pollTimer = setTimeout(loadStatus, ms)
 }
 async function loadStatus() {
+  if (disposed) return
   try {
     if (!props.api || typeof props.api.get !== 'function') throw new Error('no api')
     const res = await props.api.get(`${PLUGIN}/status?lang=${encodeURIComponent(locale.value)}`)
+    if (disposed) return
     const s = res && res.stats ? res.stats : null
     stats.value = s
     summaryState.value = s ? 'available' : 'unavailable'
@@ -553,12 +569,13 @@ async function loadStatus() {
     // 有运行中的来源则持续轮询，直至全部结束
     if (runState.value.length) armPoll(2500)
   } catch {
+    if (disposed) return
     stats.value = null
     summaryState.value = 'unavailable'
     runState.value = []
   }
 }
-onUnmounted(() => clearTimeout(pollTimer))
+onUnmounted(() => { disposed = true; clearTimeout(pollTimer) })
 const overviewRows = computed(() => {
   const by = (stats.value && stats.value.by_status) || {}
   return [
@@ -711,7 +728,34 @@ async function testProvider(pid) {
   }
 }
 
+// 定时表达式必须是五段，且每段只含数字与 * , - / 这些合法字符。这里只挡住明显写错的
+// 输入，真正的语义校验仍由后端 CronTrigger 负责——放非法值过去的话，后端只会静静地跳过
+// 该来源，界面上看不出任何异常，用户只会发现定时任务再也不触发了。
+const CRON_SEGMENT = /^[\d*,\-/]+$/
+function cronError(expr) {
+  const value = (expr || '').trim()
+  if (!value) return ''
+  const parts = value.split(/\s+/)
+  if (parts.length !== 5 || !parts.every(p => CRON_SEGMENT.test(p))) return t('cronInvalid')
+  return ''
+}
+const activeCronError = computed(() => {
+  const group = config.providers && config.providers[activeGroup.value]
+  return group ? cronError(group.cron) : ''
+})
+// 哪些来源的 cron 写错了，保存前据此拦截并指名道姓。
+const cronErrors = computed(() => Object.entries(config.providers || {})
+  .filter(([, conf]) => conf && cronError(conf.cron))
+  .map(([pid]) => {
+    const spec = providerSpecs.value.find(s => s.provider_id === pid)
+    return (spec && spec.provider_name) || pid
+  }))
+
 function saveConfig() {
+  if (cronErrors.value.length) {
+    error.value = `${t('cronInvalid')}：${cronErrors.value.join('、')}`
+    return
+  }
   saving.value = true
   try {
     emit('save', deepClone(config))

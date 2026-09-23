@@ -1,20 +1,5 @@
 # 自动订阅助手（AutomaticSubscriptionAssistant）
 
-## 上游引用
-
-| 项 | 内容 |
-| --- | --- |
-| 上游仓库 | https://github.com/Aqr-K/MoviePilot-Plugins |
-| 原作者 | Aqr-K |
-| 基线版本 | v0.2.13（上游 `plugins.v2/automaticsubscriptionassistant`，V2 实现） |
-| 引入时间 | 2026-09 重建本仓库时确认 |
-
-> 本目录是 **V3 专用重实现**（v1.0.0）：基于上游 v0.2.13 的功能与交互，
-> 将宿主能力调用迁移到 MoviePilot V3 SDK（`app.sdk.*`），媒体主身份统一为
-> `media_source`/`media_id` 成对字段。上游后续更新需人工比对合并，不自动同步。
-
----
-
 统一聚合 **豆瓣榜单 / 猫眼榜单 / 热门媒体 / Mikan 季度新番 / 奈飞榜单** 五类来源，按你的规则组合过滤后**自动订阅**的 MoviePilot 插件。每个来源可单独开关、单独定时、单独手动运行，所有来源共用一套「识别 → 查重 → 订阅 → 记历史」落地管线，绝不重复订阅。
 
 ---
@@ -54,8 +39,6 @@
 ---
 
 ## 安装
-
-> **运行环境**：本目录是 **MoviePilot V3 专用实现**，要求 MoviePilot **>= 3.0.0**（`package.v3.json` 已声明 `system_version`）。媒体主身份统一为 `media_source`/`media_id` 成对字段；从 v0.2.x 升级而来的插件历史记录会在首次载入时自动幂等迁移，无需手工处理。
 
 1. 在 MoviePilot 的「插件市场」中安装「自动订阅助手」。
 2. 安装后在「插件」页找到它，点击进入配置。

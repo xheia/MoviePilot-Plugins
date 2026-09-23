@@ -34,15 +34,11 @@ class ProviderRunner:
         spec = provider.get_spec()
         filter_chain = build_filter_chain([f.key for f in spec.filters_schema])
 
-        try:
-            items = provider.fetch(provider_config.options, self.ctx)
-        except Exception as exc:  # noqa: BLE001 - 整源抓取失败兜底
-            self._report_error(provider, exc)
-            return stats
-
         processed = 0
         try:
-            for item in items:
+            # fetch 是生成器函数，调用本身不执行函数体：抓取失败一律在迭代时才抛出，
+            # 故整源兜底必须裹住这个循环，裹调用点是捕不到的。
+            for item in provider.fetch(provider_config.options, self.ctx):
                 # 响应退出信号。
                 if self.ctx.event is not None and self.ctx.event.is_set():
                     break
@@ -61,9 +57,25 @@ class ProviderRunner:
                         self.on_progress(processed)
                     except Exception:  # noqa: BLE001 - 进度回调不得影响主流程
                         pass
+        except Exception as exc:  # noqa: BLE001 - 整源抓取失败兜底，已处理的条目照常计入
+            self._report_error(provider, exc)
         finally:
             self.history.flush()
+            self._prune_history()
         return stats
+
+    def _prune_history(self) -> None:
+        """按全局配置修剪历史，保留最近若干条；未配置上限则不动。"""
+        keep = getattr(self.gcfg, "history_keep", 0) or 0
+        if keep <= 0:
+            return
+        try:
+            removed = self.history.prune(keep)
+            if removed and self.ctx.logger:
+                self.ctx.logger.info(f"历史记录超出保留上限 {keep} 条，已清理 {removed} 条较早记录")
+        except Exception as exc:  # noqa: BLE001 - 修剪失败不影响本轮已完成的订阅与记录
+            if self.ctx.logger:
+                self.ctx.logger.warning(f"清理历史记录失败: {exc}")
 
     def _report_error(self, provider: "RankProvider", error: Exception) -> None:
         """整源失败：记日志并回调 on_error（如系统 toast）。"""

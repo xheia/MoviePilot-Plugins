@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 # 全局默认值集中定义，避免散落。
 DEFAULT_USERNAME = "自动订阅助手"
 
+# 历史保留条数，0 表示不限制。
+DEFAULT_HISTORY_KEEP = 0
+
 
 class TypedConfigAccess:
     """原始 dict -> 类型安全访问器。缺失 key 一律回退默认值。"""
@@ -108,6 +111,11 @@ class GlobalConfig(TypedConfigAccess):
         return self.get_str("username", DEFAULT_USERNAME)
 
     @property
+    def history_keep(self) -> int:
+        """历史保留条数；0（默认）表示不限制，不做修剪。"""
+        return self.get_int("history_keep", DEFAULT_HISTORY_KEEP)
+
+    @property
     def exist_ok(self) -> bool:
         """加订阅时允许已存在（避免重复报错）。"""
         return self.get_bool("exist_ok", True)
@@ -191,6 +199,7 @@ def build_defaults(specs: List["ProviderSpec"]) -> dict:
             "username": DEFAULT_USERNAME,
             "exist_ok": True,
             "notify": False,
+            "history_keep": DEFAULT_HISTORY_KEEP,
             "onlyonce": False,
             "clear": False,
         },

@@ -20,9 +20,8 @@ key 恒为 放送日期/放送开始/官方网站/Bangumi番组计划链接。�
   供历史展示/未来使用；**executor 识别仍只用主标题**（真正用别名做识别需改
   executor，属另一范畴，本次不动 executor）。
 
-产出统一主身份对 ``media_source=MediaSource.Bangumi`` / ``media_id={bgm subject id}``
-时 executor 走 ``recognize_media(media_source=, media_id=)`` 识别；抓不到 bgm id 时
-条目不带身份（``__post_init__`` 会把半对清空）退化为 title+year 名称识别。
+产出 ``bangumi_id``（bgm.tv subject id）时 executor 走宿主通用
+``media_source=bangumi, media_id=...`` 识别；抓不到 bgm id 时退化为 title+year 名称识别。
 封面 ``cover`` 同时落到 ``RankMediaItem.poster`` 与 ``source_meta``。
 冷门番若 TMDB 名称匹配不到需注意（见 README 已知限制）。
 """
@@ -258,9 +257,8 @@ class MikanRankProvider(RankProvider):
     """Mikan 季度新番来源：解析蜜柑季度番剧列表为标准化 ``RankMediaItem``。
 
     ``resolve_bangumi_id`` 为 True 时逐条抓详情，一次请求拿齐 bgm subject id +
-    真实放送年 + 原名/别名：产出统一主身份对（``MediaSource.Bangumi`` + bgm id）时
-    executor 走 ``recognize_media(media_source=, media_id=)`` 识别，抓不到 bgm id 时
-    退化为 title+year 名称识别；
+    真实放送年 + 原名/别名：产出 ``bangumi_id`` 时 executor 走宿主通用媒体身份识别，
+    抓不到 bgm id 时退化为 title+year 名称识别；
     真实放送年（解析到才）覆盖配置/当前年；``original_title``/``aliases`` 仅存
     ``source_meta``（executor 识别仍用主标题，未接入别名识别）。封面 ``cover`` 同时落到
     ``poster`` 与 ``source_meta``。番剧统一按 ``MediaType.TV`` 处理。
@@ -363,8 +361,9 @@ class MikanRankProvider(RankProvider):
             title=entry["title"],
             year=year,
             type_hint=MediaType.TV,
-            media_source=MediaSource.Bangumi,
-            media_id=detail.get("bgm_id"),
+            bangumi_id=detail.get("bgm_id"),
+            media_source=MediaSource.Bangumi if detail.get("bgm_id") else None,
+            media_id=str(detail["bgm_id"]) if detail.get("bgm_id") else None,
             poster=cover,
             source_meta={
                 "mikan_id": entry["mikan_id"],

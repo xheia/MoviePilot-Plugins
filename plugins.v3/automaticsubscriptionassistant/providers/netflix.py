@@ -210,6 +210,9 @@ _RICH_UA = (
 _RICH_TIMEOUT = 30
 # 默认并发抓取线程数。
 _DEFAULT_MAX_WORKERS = 5
+
+# 并发抓取的线程数上限，防止配置里填进一个把宿主进程拖垮的值。
+_MAX_MAX_WORKERS = 16
 # 页面内嵌 GraphQL 存储起始标记：`...reactContext.models.graphql = JSON.parse('<单引号JS串>')`。
 _GRAPHQL_MARKER = "reactContext.models.graphql = JSON.parse('"
 # 单引号 JS 字符串字面量转义解码：\\ \' \" \n \t \uXXXX \xXX 等（单次左→右扫描）。
@@ -739,7 +742,10 @@ class NetflixRankProvider(RankProvider):
         ``ThreadPoolExecutor(max_workers)`` 并发抓取；随后对全球非英语两类（若选中且开了全球榜）
         回退现有 TSV title-only 逻辑补上。全局 ``seen`` 去重贯穿两条路径。
         """
-        max_workers = max(1, self._to_int(options.get("max_workers"), _DEFAULT_MAX_WORKERS))
+        # 并发度取用户配置，但夹在合法区间内：这个值直接决定开多少线程，配大了会连
+        # 累宿主进程，而榜单抓取本身也不需要更高的并发。
+        max_workers = min(max(1, self._to_int(options.get("max_workers"), _DEFAULT_MAX_WORKERS)),
+                          _MAX_MAX_WORKERS)
         global_on = bool(options.get("global", True))
         global_cats = self._as_list(options.get("global_media_types")) if global_on else []
         selections = self._resolve_country_selections(options)

@@ -5,15 +5,6 @@
 
 本文件仅负责与 MoviePilot 插件框架对接（元数据、配置装载、定时服务注册、
 API 端点），真正的抓取 / 过滤 / 落地逻辑均在 ``core`` 与 ``providers`` 中实现。
-
-V3 专用实现，相对 V2 的主要差异：
-
-1. 宿主能力统一从稳定 SDK 取得（``app.sdk.config`` / ``app.sdk.events`` /
-   ``app.sdk.logging`` / ``app.sdk.plugin`` / ``app.sdk.media``）。
-2. 媒体主身份统一为 ``media_source`` / ``media_id`` 成对字段：识别入口不再接收
-   ``tmdbid`` / ``doubanid`` / ``bangumiid``，订阅入口与插件自有数据（历史记录、
-   来源缓存）同样只保存这一对；存量历史在载入时做一次幂等迁移。
-3. 订阅表不再有来源专用 ID 列，订阅列表接口改为回传统一身份字段。
 """
 from datetime import datetime, timedelta
 from threading import Event, Lock
@@ -26,12 +17,12 @@ from apscheduler.triggers.cron import CronTrigger
 from app.chain.download import DownloadChain
 from app.chain.subscribe import SubscribeChain
 from app.db.oper.subscribe import SubscribeOper
+from app.plugins import _PluginBase
 from app.schemas.event import ConfigChangeEventData
 from app.schemas.types import EventType, MediaType
 from app.sdk.config import settings
 from app.sdk.events import eventmanager
 from app.sdk.logging import logger
-from app.sdk.plugin import _PluginBase
 
 from .core.config import PluginSettings, ProviderConfig, build_defaults
 from .core.dedup import SubscribedIndex, build_subscribed_index
@@ -39,11 +30,13 @@ from .core.executor import SubscribeExecutor
 from .core.filters import build_filter_chain
 from .core.history import HistoryStore
 from .core.i18n import localize_provider_name, localize_spec
+from .core.migration import migrate_history_from_kv
 from .core.models import RankMediaItem
 from .core.provider import ProviderContext
 from .core.registry import registry
 from .core.runner import ProviderRunner
 from .core.subscribes import SubscribeManager
+from .core.tables import MODELS
 
 # 导入 providers 包会触发各来源类的 @register 注册。providers 由并行流程提供，
 # 未就绪或单个来源导入异常时不应影响插件本体加载，故此处包裹兜底。
@@ -60,10 +53,10 @@ class AutomaticSubscriptionAssistant(_PluginBase):
     plugin_name = "自动订阅助手"
     # 插件描述
     plugin_desc = "统一聚合豆瓣榜单/猫眼榜单/热门媒体等来源，可组合过滤后自动订阅。"
-    # 插件图标（V3 使用插件库 icons 目录下的本地文件名）
-    plugin_icon = "Auto_Subscribe_Assistant.png"
-    # 插件版本（V3 专用实现，按 x.y.z -> (x+1).0.0 完成代际跃迁）
-    plugin_version = "1.0.0"
+    # 插件图标
+    plugin_icon = "https://raw.githubusercontent.com/Aqr-K/MoviePilot-Plugins/main/icons/Auto_Subscribe_Assistant.png"
+    # 插件版本
+    plugin_version = "3.1.0"
     # 插件作者
     plugin_author = "Aqr-K"
     # 作者主页
@@ -116,10 +109,17 @@ class AutomaticSubscriptionAssistant(_PluginBase):
         onlyonce = gcfg.onlyonce
         clear = gcfg.clear
 
+        # 存量历史从插件 KV 搬进自有表，只在还有存量时真的执行。
+        try:
+            migrate_history_from_kv(self.__history_store(), self.get_data,
+                                    self.save_data, self.del_data, logger)
+        except Exception as exc:  # noqa: BLE001 - 迁移失败不阻断插件启动，存量原样保留
+            logger.error(f"{self.plugin_name}：历史记录迁移失败，存量已保留: {exc}")
+
         # 清空历史（一次性）。
         if clear:
             try:
-                self.save_data("history", [])
+                self.__history_store().clear()
                 logger.info(f"{self.plugin_name}：已清空全部历史记录")
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"{self.plugin_name}：清空历史失败: {exc}")
@@ -144,6 +144,14 @@ class AutomaticSubscriptionAssistant(_PluginBase):
     def get_command() -> List[Dict[str, Any]]:
         """本插件不注册远程命令。"""
         return []
+
+    def get_database_models(self) -> List[type]:
+        """声明插件自有表：订阅历史。"""
+        return list(MODELS)
+
+    def __history_store(self) -> HistoryStore:
+        """构造绑定插件自有库的历史仓库。"""
+        return HistoryStore(self.get_database().session)
 
     @staticmethod
     def get_render_mode() -> Tuple[str, str]:
@@ -208,14 +216,19 @@ class AutomaticSubscriptionAssistant(_PluginBase):
         return services
 
     def stop_service(self):
-        """置退出信号并关闭调度器。"""
+        """置退出信号并关闭调度器。
+
+        关闭不等待在途任务：``stop_service`` 经 ``init_plugin`` 同步跑在保存配置的请求
+        线程上，而一次性任务可能正卡在几分钟的抓取里。在途任务已经通过上面 set 的退出
+        信号被要求收尾，无须再阻塞调用方等它跑完。
+        """
         try:
             if self._event:
                 self._event.set()
             if self._scheduler:
                 self._scheduler.remove_all_jobs()
                 if self._scheduler.running:
-                    self._scheduler.shutdown()
+                    self._scheduler.shutdown(wait=False)
                 self._scheduler = None
         except Exception as exc:  # noqa: BLE001
             logger.error(f"{self.plugin_name}：停止服务异常: {exc}")
@@ -252,7 +265,7 @@ class AutomaticSubscriptionAssistant(_PluginBase):
             get_data=self.get_data,
             save_data=self.save_data,
         )
-        history = HistoryStore(self.get_data, self.save_data, self.del_data)
+        history = self.__history_store()
         runner = ProviderRunner(
             context, self._settings.global_config, history,
             on_error=self.__on_provider_error,
@@ -278,9 +291,13 @@ class AutomaticSubscriptionAssistant(_PluginBase):
         构建**一个**已订阅索引贯穿所有来源，实现跨渠道去重（一个媒体在任一来源订阅后，
         后续来源命中即跳过识别）。
         """
+        # 开跑时就认定本轮的退出信号。``init_plugin`` 会换上一个全新的 Event，若每轮
+        # 循环都重读实例属性，重载恰好发生在两个来源之间时，这里会读到那个尚未置位的新
+        # 信号，本轮就再也停不下来了。
+        event = self._event
         subscribed_index = self.__build_subscribed_index()
         for provider in self._providers:
-            if self._event and self._event.is_set():
+            if event is not None and event.is_set():
                 break
             if not self.__provider_config(provider).enabled:
                 continue
@@ -333,12 +350,23 @@ class AutomaticSubscriptionAssistant(_PluginBase):
     # 调度与配置辅助
     # ------------------------------------------------------------------ #
     def __schedule_once(self, func, **kwargs):
-        """3 秒后触发一次 date 任务（懒创建 BackgroundScheduler）。"""
+        """3 秒后触发一次 date 任务（懒创建 BackgroundScheduler）。
+
+        同一目标的重复触发按 ``job_id`` 合并：连点「立即运行」或重复调 /run 时，
+        新的一次顶掉尚未开跑的那次，避免同一来源被并发跑出多个 runner 互相覆盖历史。
+        """
         try:
             if not self._scheduler:
                 self._scheduler = BackgroundScheduler(timezone=settings.TZ)
             run_date = datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3)
-            self._scheduler.add_job(func=func, trigger="date", run_date=run_date, kwargs=kwargs or {})
+            job_id = f"{self.plugin_config_prefix}once_{getattr(func, '__name__', 'task')}"
+            provider_id = (kwargs or {}).get("provider_id")
+            if provider_id:
+                job_id = f"{job_id}_{provider_id}"
+            self._scheduler.add_job(func=func, trigger="date", run_date=run_date,
+                                    kwargs=kwargs or {}, id=job_id,
+                                    replace_existing=True, max_instances=1,
+                                    coalesce=True, misfire_grace_time=60)
             if not self._scheduler.running:
                 self._scheduler.start()
         except Exception as exc:  # noqa: BLE001
@@ -386,6 +414,10 @@ class AutomaticSubscriptionAssistant(_PluginBase):
             {
                 "path": "/history", "endpoint": self.api_history, "methods": ["GET"],
                 "auth": "bear", "summary": "历史记录", "description": "按来源/状态过滤并分页查询历史",
+            },
+            {
+                "path": "/history/uniques", "endpoint": self.api_history_uniques, "methods": ["GET"],
+                "auth": "bear", "summary": "历史身份键", "description": "按当前筛选条件返回全部历史的身份键，供全选",
             },
             {
                 "path": "/history", "endpoint": self.api_delete_history, "methods": ["DELETE"],
@@ -493,11 +525,23 @@ class AutomaticSubscriptionAssistant(_PluginBase):
 
         provider/status/mtype 支持逗号分隔多值；单值向后兼容。year_min/year_max 为发行年份闭区间。
         """
-        store = HistoryStore(self.get_data, self.save_data, self.del_data)
+        store = self.__history_store()
         records, total = store.query(provider=provider, status=status, mtype=mtype,
                                      keyword=keyword, year_min=year_min, year_max=year_max,
                                      page=page, count=count)
-        return {"list": records, "total": total, "page": page, "count": count}
+        return {"list": records, "total": total, "page": page, "count": len(records)}
+
+    def api_history_uniques(self, provider: str = None, status: str = None, mtype: str = None,
+                            keyword: str = None, year_min: str = None,
+                            year_max: str = None) -> Dict[str, Any]:
+        """按同一套筛选条件返回全部历史的身份键，供前端「选全部」一次取齐。
+
+        只回身份键、不回整行记录：全选要的就是键集合，拉整行既浪费带宽又会被单页上限截断。
+        """
+        uniques = self.__history_store().uniques(
+            provider=provider, status=status, mtype=mtype, keyword=keyword,
+            year_min=year_min, year_max=year_max)
+        return {"uniques": uniques, "total": len(uniques)}
 
     def api_delete_history(self, unique: str, apikey: str) -> Dict[str, Any]:
         """删除一条历史（apikey 鉴权，供后端/脚本调用）。"""
@@ -514,7 +558,7 @@ class AutomaticSubscriptionAssistant(_PluginBase):
 
     def api_status(self, lang: str = None) -> Dict[str, Any]:
         """返回总开关、各来源启用状态与历史统计（来源名按 lang 本地化）。"""
-        store = HistoryStore(self.get_data, self.save_data, self.del_data)
+        store = self.__history_store()
         providers = []
         for provider in self._providers:
             spec = provider.get_spec()
@@ -639,7 +683,7 @@ class AutomaticSubscriptionAssistant(_PluginBase):
 
     def __delete_history(self, unique: str) -> Dict[str, Any]:
         """删除历史的共用实现。"""
-        store = HistoryStore(self.get_data, self.save_data, self.del_data)
+        store = self.__history_store()
         removed = store.delete(unique)
         if removed:
             return {"code": 0, "message": "删除成功"}
@@ -650,7 +694,7 @@ class AutomaticSubscriptionAssistant(_PluginBase):
         uniques = (request or {}).get("uniques") if isinstance(request, dict) else None
         if not isinstance(uniques, list) or not uniques:
             return {"code": 1, "message": "缺少 uniques 列表"}
-        store = HistoryStore(self.get_data, self.save_data, self.del_data)
+        store = self.__history_store()
         removed = store.delete_many(uniques)
         return {"code": 0, "message": f"已删除 {removed} 条", "removed": removed}
 
@@ -663,7 +707,7 @@ class AutomaticSubscriptionAssistant(_PluginBase):
         unique = (request or {}).get("unique") if isinstance(request, dict) else None
         if not unique:
             return {"code": 1, "message": "缺少 unique"}
-        store = HistoryStore(self.get_data, self.save_data, self.del_data)
+        store = self.__history_store()
         rec = store.get(unique)
         if rec is None:
             return {"code": 1, "message": "未找到该记录"}
@@ -673,7 +717,8 @@ class AutomaticSubscriptionAssistant(_PluginBase):
         try:
             spec = provider.get_spec()
             pconf = ProviderConfig(self._settings.provider_raw(provider.provider_id), spec)
-            # 还原候选：类型中文串 → MediaType 枚举；统一主身份对供识别链直接命中。
+            # 还原候选：类型中文串 → MediaType 枚举；优先恢复 v3 通用身份，旧 ID
+            # 字段同时保留，供旧历史与兼容识别链使用。
             type_val = rec.get("type")
             try:
                 type_hint = MediaType(type_val) if type_val else None
@@ -683,10 +728,14 @@ class AutomaticSubscriptionAssistant(_PluginBase):
                 title=rec.get("title") or "",
                 year=rec.get("year"),
                 type_hint=type_hint,
-                media_source=rec.get("media_source"),
-                media_id=rec.get("media_id"),
+                douban_id=rec.get("doubanid"),
+                tmdb_id=rec.get("tmdbid"),
+                bangumi_id=rec.get("bangumiid"),
                 season=rec.get("season"),
                 poster=rec.get("poster"),
+                media_source=rec.get("media_source"),
+                media_id=rec.get("media_id"),
+                episode_group=rec.get("episode_group"),
             )
             context = ProviderContext(
                 chain=self.chain,
@@ -725,7 +774,11 @@ class AutomaticSubscriptionAssistant(_PluginBase):
             eventmanager.send_event(
                 EventType.SubscribeDeleted,
                 {"subscribe_id": sid, "subscribe_info": info})
-        return SubscribeManager(SubscribeOper(), on_deleted=_on_deleted)
+        # 用配置里的用户名，与 executor 落地订阅时所用的一致；两边若分叉，管理页会
+        # 按另一个名字去查，列表恒空且无法退订。
+        return SubscribeManager(SubscribeOper(),
+                                username=self._settings.global_config.username,
+                                on_deleted=_on_deleted)
 
     def api_subscribes(self) -> Dict[str, Any]:
         """列出本插件创建的订阅。"""

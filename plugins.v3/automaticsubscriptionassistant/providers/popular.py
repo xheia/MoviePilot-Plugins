@@ -3,6 +3,9 @@
 数据来源为 ``MoviePilotServerHelper.get_subscribe_statistic``（classmethod，无需实例化，
 受 ``settings.SUBSCRIBE_STATISTIC_SHARE`` 门控，关闭时返回空）。
 服务端统计仅区分 movie / tv 两类（动漫混在 tv 中，官方接口不单列），故本来源只暴露这两个 category。
+
+统计项的媒体身份是 ``(media_source, media_id)`` 二元组，一条只带一种来源的 ID；
+本模块原样保留这对 v3 主身份，不再把来源投影到固定的单源 ID 槽位。
 """
 from __future__ import annotations
 
@@ -12,8 +15,9 @@ from app.adapters.external.server import MoviePilotServerHelper
 from app.schemas.types import MediaType
 from app.sdk.config import settings
 from app.sdk.logging import logger
+from app.sdk.media import resolve_media_identity
 
-from ..core.models import FieldSpec, ProviderSpec, RankMediaItem, resolve_identity
+from ..core.models import FieldSpec, ProviderSpec, RankMediaItem
 from ..core.provider import ProviderContext, RankProvider
 from ..core.registry import register
 
@@ -207,27 +211,29 @@ class PopularRankProvider(RankProvider):
         if genre_id is not None:
             source_meta["genre_id"] = genre_id
         name = sub.get("name")
-        # 统一主身份对优先取服务端新字段；服务端仍返回 V2 旧字段时按
-        # tmdb > douban > bangumi 优先级回推（见 core.models.resolve_identity）。
-        media_source, media_id = resolve_identity(
-            sub.get("media_source"), sub.get("media_id"),
-            tmdb_id=self._to_optional_int(sub.get("tmdbid")),
-            douban_id=self._to_str(sub.get("doubanid")),
-            bangumi_id=self._to_optional_int(sub.get("bangumiid")),
-        )
+        # 服务端以 (media_source, media_id) 表达媒体身份，一条统计只带一种来源的 ID。
+        # 交给宿主的解析器归一：半对、非法或零值身份一律退化为空身份，此时 executor
+        # 按标题 + 年份识别。
+        media_source, media_id = resolve_media_identity(
+            media_source=sub.get("media_source"), media_id=sub.get("media_id"))
+        identities = self._split_identity(media_source, media_id)
         return RankMediaItem(
             title=str(name) if name is not None else "",
             year=self._to_str(sub.get("year")),
             type_hint=mtype,
-            media_source=media_source,
-            media_id=media_id,
-            tvdb_id=self._to_optional_int(sub.get("tvdbid")),
-            imdb_id=self._to_str(sub.get("imdbid")),
+            **identities,
             season=self._to_optional_int(sub.get("season")),
             poster=sub.get("poster"),
             source_meta=source_meta,
-            unique_seed=f"{name}:{sub.get('tmdbid')}",
+            unique_seed=f"{name}:{media_source.value if media_source else None}:{media_id}",
         )
+
+    @staticmethod
+    def _split_identity(media_source, media_id) -> dict:
+        """返回宿主通用身份，不维护来源到固定字段的映射表。"""
+        if not media_source or not media_id:
+            return {}
+        return {"media_source": media_source, "media_id": str(media_id)}
 
     @staticmethod
     def _map_media_type(raw) -> Optional[MediaType]:

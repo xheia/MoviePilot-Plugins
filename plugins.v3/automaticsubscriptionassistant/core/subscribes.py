@@ -15,10 +15,11 @@ VALID_STATES = ("R", "P", "S")
 # 本插件订阅落地时使用的用户名（executor.add(username=...) 与此一致）。
 PLUGIN_USERNAME = "自动订阅助手"
 
-# 序列化到前端的订阅字段。V3 订阅表以统一主身份对（media_source / media_id）为准，
-# 不再有 tmdbid / doubanid / bangumiid 列。
+# 序列化到前端的订阅字段。媒体身份是 ``media_source`` + ``media_id`` 二元组，
+# 单独的 media_id 不足以定位媒体，两者必须成对取用。
 _FIELDS = ("id", "name", "year", "type", "media_source", "media_id", "season",
-           "poster", "state", "total_episode", "lack_episode", "date", "last_update")
+           "episode_group", "poster", "state", "total_episode", "lack_episode", "date",
+           "last_update")
 
 
 class SubscribeManager:
@@ -35,13 +36,28 @@ class SubscribeManager:
         subs = self.oper.list_by_username(self.username) or []
         return [self._to_dict(s) for s in subs]
 
+    def _owned(self, sid):
+        """取属于本插件的订阅，不存在或不属于本插件时返回 None。
+
+        ``list_mine`` 按用户名过滤后才交给前端，但订阅 ID 是自增整数、极易猜到，
+        写操作若只凭 ID 就动手，任何能调到本端点的人都能改掉别人的订阅。故写路径
+        一律先用同一条用户名判据复核归属。
+        """
+        sub = self.oper.get(sid)
+        if sub is None or getattr(sub, "username", None) != self.username:
+            return None
+        return sub
+
     def delete(self, ids) -> Dict[str, int]:
-        """批量退订：逐条删除并回调发事件。返回 {"ok","failed"}。单条异常计入 failed。"""
+        """批量退订本插件的订阅：逐条删除并回调发事件。返回 {"ok","failed"}。
+
+        不属于本插件的 ID 计入 failed，不会被删除。单条异常同样计入 failed。
+        """
         ok = 0
         failed = 0
         for sid in ids or []:
             try:
-                sub = self.oper.get(sid)
+                sub = self._owned(sid)
                 if sub is None:
                     failed += 1
                     continue
@@ -54,13 +70,20 @@ class SubscribeManager:
         return {"ok": ok, "failed": failed}
 
     def set_state(self, ids, state: str) -> Dict[str, int]:
-        """批量置状态（R/P/S）。非法状态抛 ValueError。返回 {"ok","failed"}。"""
+        """批量置本插件订阅的状态（R/P/S）。非法状态抛 ValueError。返回 {"ok","failed"}。
+
+        不属于本插件的 ID 计入 failed，不会被改动；``oper.update`` 对不存在的 ID
+        只返回 None 而不抛错，故存在性也在此一并判定，避免虚报成功条数。
+        """
         if state not in VALID_STATES:
             raise ValueError(f"非法订阅状态: {state}（允许 {VALID_STATES}）")
         ok = 0
         failed = 0
         for sid in ids or []:
             try:
+                if self._owned(sid) is None:
+                    failed += 1
+                    continue
                 self.oper.update(sid, {"state": state})
                 ok += 1
             except Exception:  # noqa: BLE001 - 单条失败不中断整体

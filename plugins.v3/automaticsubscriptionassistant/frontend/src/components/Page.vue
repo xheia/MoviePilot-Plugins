@@ -488,7 +488,13 @@ async function fetchHistory(silent = false) {
     if (seq !== fetchSeq) return
     items.value = normalizeList(res)
     total.value = Number(res?.total) || items.value.length
-    if (page.value > pageCount.value) { page.value = pageCount.value }
+    if (page.value > pageCount.value) {
+      // 越界页（例如把最后一页删空了）服务端返回空数组。只把页码改回去不够：
+      // 列表仍是那份空结果，界面会显示成「有 N 页却一条都没有」。必须按纠正后的
+      // 页码重新取一次。
+      page.value = pageCount.value
+      return fetchHistory(silent)
+    }
   } catch (e) {
     if (seq !== fetchSeq) return
     error.value = t('historyError') + (e?.message || e)
@@ -555,17 +561,22 @@ function toggleSelectMode() { selectMode.value = !selectMode.value; if (!selectM
 function toggleOne(u) { selected.has(u) ? selected.delete(u) : selected.add(u) }
 function selectCurrentPage() { items.value.forEach(it => it.unique && selected.add(it.unique)) }
 async function selectAll() {
-  // 选全部：拉取当前筛选下的所有 unique（大页量一次取回）后全选。
+  // 选全部：只取当前筛选下的身份键，不拉整行记录。
+  // 与列表共用 fetchSeq：请求途中用户改了筛选条件就作废本次结果，
+  // 否则会把已经看不见的记录悄悄勾上，接着的批量删除就删错了对象。
+  const seq = fetchSeq
   selectingAll.value = true
   try {
     if (!props.api || typeof props.api.get !== 'function') throw new Error(t('apiUnavailable'))
-    const query = qs({ ...historyQuery(), page: 1, count: 100000 })
-    const res = await props.api.get(`${PLUGIN}/history?${query}`)
-    normalizeList(res).forEach(r => r.unique && selected.add(r.unique))
+    const res = await props.api.get(`${PLUGIN}/history/uniques?${qs(historyQuery())}`)
+    if (seq !== fetchSeq) return
+    const uniques = Array.isArray(res?.uniques) ? res.uniques : []
+    uniques.forEach(u => u && selected.add(u))
   } catch (e) {
+    if (seq !== fetchSeq) return
     error.value = t('historyError') + (e?.message || e)
   } finally {
-    selectingAll.value = false
+    if (seq === fetchSeq) selectingAll.value = false
   }
 }
 function askDelete(ids) { if (ids && ids.length) { confirm.ids = [...ids]; confirm.open = true } }

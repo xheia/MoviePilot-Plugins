@@ -3,15 +3,14 @@
 数据来源为 RSSHub 的豆瓣榜单 RSS（内置榜单路由 + 用户自定义地址）。RSSHub 基址可自定义，
 部分地区 rsshub.app 被 SNI 黑名单封锁时，可对接用户自建的 RSSHub 实例（``rsshub_base`` 选项）。
 抓取逻辑移植自参考插件 ``doubanrankplus``，纯函数化后由统一落地管线消费。
-豆瓣评分、季号等信息在 executor 识别（``recognize_media(media_source=MediaSource.Douban,
-media_id=<douban id>)``）后由 MediaInfo 提供，故 VoteFilter 归属 post 阶段。
-原插件的 70 分钟限流退避窗口本次未移植（见 README）。
+豆瓣评分、季号等信息在 executor 通过宿主通用媒体身份识别后由 MediaInfo 提供，
+故 VoteFilter 归属 post 阶段。原插件的 70 分钟限流退避窗口本次未移植（见 README）。
 """
 from __future__ import annotations
 
 import re
 import xml.dom.minidom
-from typing import Iterator, List
+from typing import Iterator, List, Optional
 
 from app.schemas.types import MediaSource, MediaType
 from app.sdk.config import settings
@@ -25,6 +24,12 @@ from ..core.registry import register
 
 # 默认 RSSHub 基址；部分地区 rsshub.app 被 SNI 黑名单封锁，可在配置里改为自建实例。
 DEFAULT_RSSHUB_BASE = "https://rsshub.app"
+
+# 单个 RSS 文档允许的最大字符数。榜单 RSS 通常只有几十 KB。
+_MAX_RSS_BYTES = 8 * 1024 * 1024
+
+# XML 实体声明。榜单 RSS 用不到，出现即视为不可信内容。
+_ENTITY_DECL = re.compile(r"<!ENTITY", re.IGNORECASE)
 
 # 内置榜单路由：key 为 select 选项值，value 为 RSSHub 相对路由（与基址拼接成完整地址）。
 DOUBAN_ADDRESS = {
@@ -163,6 +168,28 @@ class DoubanRankProvider(RankProvider):
             base = f"https://{base}"
         return base
 
+    def _safe_xml(self, text: str, addr: str) -> Optional[str]:
+        """校验外部 RSS 文本可安全解析，不合格返回 None。
+
+        RSS 地址可由用户自定义、也可能是被劫持的公共实例，即外部内容不可信。标准库
+        的解析器不解析外部实体，但不限制内部实体展开：几 KB 的嵌套实体声明就能膨胀到
+        撑爆内存，而插件与宿主同进程，炸的是整个 MoviePilot。榜单 RSS 用不到实体声明，
+        因此见到就拒绝；同时对整体体积设限，挡住超大文档。
+
+        :param text: 响应正文
+        :param addr: 来源地址，仅用于日志
+        :return: 可安全解析的文本，或 None
+        """
+        if not text:
+            return None
+        if len(text) > _MAX_RSS_BYTES:
+            logger.warn(f"{self.provider_name}：RSS 文档超过 {_MAX_RSS_BYTES} 字节，跳过：{addr}")
+            return None
+        if _ENTITY_DECL.search(text):
+            logger.warn(f"{self.provider_name}：RSS 文档含实体声明，出于安全考虑跳过：{addr}")
+            return None
+        return text
+
     def _fetch_addr(self, addr: str, proxy: bool) -> Iterator[RankMediaItem]:
         """抓取单个 RSS 地址并解析其中的 item。"""
         proxies = settings.PROXY if proxy else None
@@ -170,7 +197,10 @@ class DoubanRankProvider(RankProvider):
         if not ret:
             logger.warn(f"{self.provider_name}：RSS 地址无返回，跳过：{addr}")
             return
-        root = xml.dom.minidom.parseString(ret.text).documentElement
+        text = self._safe_xml(ret.text, addr)
+        if text is None:
+            return
+        root = xml.dom.minidom.parseString(text).documentElement
         if root is None:
             return
         items = root.getElementsByTagName("item")
@@ -199,7 +229,8 @@ class DoubanRankProvider(RankProvider):
             title=str(title),
             year=year,
             type_hint=type_hint,
-            media_source=MediaSource.Douban,
+            douban_id=douban_id,
+            media_source=MediaSource.Douban if douban_id else None,
             media_id=douban_id,
             poster=self._parse_poster(item),
             source_meta={"link": str(link)},
