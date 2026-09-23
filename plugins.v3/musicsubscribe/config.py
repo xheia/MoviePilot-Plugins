@@ -19,8 +19,8 @@ CONFIG_PREFIX = "music_"
 #: 宿主机映射端口统一用 1630（如 ``-p 1630:3000``）。
 DEFAULT_NCM_API_URL = "http://192.168.1.100:1630"
 
-#: 缺失曲目搜索时可额外启用的音乐来源（豆瓣音乐）
-DOUBAN_SOURCE_VALUE = "doubanmusic"
+#: 订阅人默认值（写到宿主订阅记录的 username 上，便于在订阅列表里区分来源）
+DEFAULT_SUBSCRIBE_USER = "歌单订阅"
 
 
 #: 默认配置
@@ -31,7 +31,7 @@ DEFAULTS: Dict[str, Any] = {
     "media_server": [],
     "exact_match": True,
     # 缺失曲目订阅
-    "douban_source": True,
+    "subscribe_user": DEFAULT_SUBSCRIBE_USER,
     # 网易云
     "ncm_api_url": DEFAULT_NCM_API_URL,
     "wymusic_paths": "",
@@ -43,10 +43,11 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 #: 布尔配置项
-_BOOL_KEYS = ("enabled", "exact_match", "douban_source", "wy_daily_list", "wy_daily_song")
+_BOOL_KEYS = ("enabled", "exact_match", "wy_daily_list", "wy_daily_song")
 #: 字符串配置项
 _STR_KEYS = (
     "cron", "ncm_api_url", "wymusic_paths", "qqmusic_paths", "qishui_paths",
+    "subscribe_user",
 )
 
 

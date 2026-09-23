@@ -28,7 +28,7 @@ from app.sdk.services import ServiceConfigHelper
 from .config import (
     CONFIG_PREFIX,
     DEFAULT_NCM_API_URL,
-    DOUBAN_SOURCE_VALUE,
+    DEFAULT_SUBSCRIBE_USER,
     defaults,
     normalize,
     parse_playlist_line,
@@ -41,7 +41,7 @@ from .music.plex import PlexMusic
 from .music.qqmusic import QQMusicClient
 from .music.subscribe import TARGET_ALBUM, TARGET_SONG, MusicSubscriber
 from .music.track import Track, format_duration
-from .store import PendingStore, pending_key
+from .store import HistoryStore, PendingStore, pending_key
 
 #: 插件数据键名：最近一次同步统计
 SYNC_STATS_KEY = "sync_stats"
@@ -74,7 +74,7 @@ class MusicSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "music.png"
     # 插件版本
-    plugin_version = "2.1.0"
+    plugin_version = "2.2.0"
     # 插件作者
     plugin_author = "xheia"
     # 作者主页
@@ -92,8 +92,8 @@ class MusicSubscribe(_PluginBase):
     _cron: Optional[str] = None
     _media_server: List[str] = []
     _exact_match = True
-    #: 缺失曲目搜索是否带上豆瓣音乐源（关闭则按宿主的音乐元数据源设置搜索）
-    _douban_source = True
+    #: 订阅人（写到宿主订阅记录的 username 上）
+    _subscribe_user = DEFAULT_SUBSCRIBE_USER
     _ncm_api_url = DEFAULT_NCM_API_URL
     _wymusic_paths = ""
     _qqmusic_paths = ""
@@ -107,6 +107,7 @@ class MusicSubscribe(_PluginBase):
     netease: Optional[NeteaseClient] = None
     _subscriber: Optional[MusicSubscriber] = None
     _pending: Optional[PendingStore] = None
+    _history: Optional[HistoryStore] = None
     #: 当前网易云账号昵称
     _username: Optional[str] = None
     #: 媒体服务器配置与可选项（宿主的媒体服务器列表）
@@ -130,7 +131,7 @@ class MusicSubscribe(_PluginBase):
         self._cron = cfg["cron"]
         self._media_server = list(cfg["media_server"])
         self._exact_match = cfg["exact_match"]
-        self._douban_source = cfg["douban_source"]
+        self._subscribe_user = cfg["subscribe_user"] or DEFAULT_SUBSCRIBE_USER
         self._ncm_api_url = cfg["ncm_api_url"] or DEFAULT_NCM_API_URL
         self._wymusic_paths = cfg["wymusic_paths"]
         self._qqmusic_paths = cfg["qqmusic_paths"]
@@ -140,8 +141,9 @@ class MusicSubscribe(_PluginBase):
 
         # 每次载入配置都换一份新的运行时对象，避免旧缓存跨配置复用
         self.netease = NeteaseClient(base_url=self._ncm_api_url, data_path=self.get_data_path())
-        self._subscriber = MusicSubscriber(sources=self._music_sources())
+        self._subscriber = MusicSubscriber(username=self._subscribe_user)
         self._pending = PendingStore(self.get_data, self.save_data)
+        self._history = HistoryStore(self.get_data, self.save_data)
         self._round_missing = {}
 
         mediaserver_configs = ServiceConfigHelper.get_mediaserver_configs()
@@ -237,6 +239,13 @@ class MusicSubscribe(_PluginBase):
              "methods": ["POST"], "auth": "bear", "summary": "从清单移除勾选的记录"},
             {"path": "/pending/clear", "endpoint": self.api_pending_clear,
              "methods": ["POST"], "auth": "bear", "summary": "清理清单（全部 / 仅失败记录）"},
+            {"path": "/pending/link", "endpoint": self.api_pending_link,
+             "methods": ["POST"], "auth": "bear",
+             "summary": "查询单条曲目的官方详情页链接（歌曲 / 专辑 / 歌手）"},
+            {"path": "/history", "endpoint": self.api_history, "methods": ["GET"],
+             "auth": "bear", "summary": "查询订阅历史（仅订阅成功的条目）"},
+            {"path": "/history/clear", "endpoint": self.api_history_clear,
+             "methods": ["POST"], "auth": "bear", "summary": "清空订阅历史"},
         ]
 
     # ------------------------------------------------------------------
@@ -280,31 +289,16 @@ class MusicSubscribe(_PluginBase):
         return self._pending
 
     def _subscribes(self) -> MusicSubscriber:
-        """取订阅器（按当前配置携带音乐搜索来源）。"""
+        """取订阅器（按当前配置携带订阅人）。"""
         if self._subscriber is None:
-            self._subscriber = MusicSubscriber(sources=self._music_sources())
+            self._subscriber = MusicSubscriber(username=self._subscribe_user)
         return self._subscriber
 
-    def _music_sources(self) -> Tuple[Any, ...]:
-        """缺失曲目搜索使用的音乐来源。
-
-        开启「豆瓣音乐源」时显式带上 ``MediaSource.DoubanMusic``；关闭则返回空元组，
-        交给宿主按自己的音乐元数据源设置搜索。
-        """
-        if not self._douban_source:
-            return ()
-        try:
-            from app.schemas.types import MediaSource
-        except Exception:  # noqa: BLE001 - 宿主过旧
-            return ()
-        source = getattr(MediaSource, "DoubanMusic", None)
-        if source is None:
-            try:
-                source = MediaSource(DOUBAN_SOURCE_VALUE)
-            except Exception:  # noqa: BLE001 - 宿主不支持该来源
-                logger.warning("当前宿主没有豆瓣音乐源，缺失曲目按宿主默认来源搜索")
-                return ()
-        return (source,)
+    def _history_store(self) -> HistoryStore:
+        """取订阅历史。"""
+        if self._history is None:
+            self._history = HistoryStore(self.get_data, self.save_data)
+        return self._history
 
     @staticmethod
     def _now() -> str:
@@ -335,6 +329,7 @@ class MusicSubscribe(_PluginBase):
             "config": dict(self._config),
             "stats": self.get_data(SYNC_STATS_KEY) or {},
             "pending": self._store().summary(),
+            "history": self._history_store().summary(),
         }
 
     def api_probe(self, api_url: Optional[str] = None) -> Dict[str, Any]:
@@ -401,6 +396,7 @@ class MusicSubscribe(_PluginBase):
             "items": records,
             "summary": self._store().summary(),
             "stats": self.get_data(SYNC_STATS_KEY) or {},
+            "history": self._history_store().summary(),
             "targets": [{"value": TARGET_SONG, "label": "歌曲"},
                         {"value": TARGET_ALBUM, "label": "专辑"}],
         }
@@ -435,8 +431,10 @@ class MusicSubscribe(_PluginBase):
 
         subscriber = self._subscribes()
         subscriber.reset()
+        now = self._now()
         done_seqs: List[int] = []
         updates: List[Dict[str, Any]] = []
+        history_items: List[Dict[str, Any]] = []
         results: List[Dict[str, Any]] = []
         succeeded = failed = 0
         for record in records:
@@ -449,8 +447,26 @@ class MusicSubscribe(_PluginBase):
             )
             result = subscriber.subscribe(track, target)
             if result.get("ok"):
-                # 订阅成功即移出清单：订阅本身去宿主的订阅列表里管理
+                # 订阅成功：移出清单并留一份订阅历史（订阅本身去宿主的订阅列表里管理）
                 done_seqs.append(int(record.get("seq") or 0))
+                history_items.append({
+                    "key": record.get("key") or "",
+                    "title": record.get("title") or "",
+                    "artist": record.get("artist") or "",
+                    "album": record.get("album") or "",
+                    "duration_text": record.get("duration_text") or "",
+                    "target": target,
+                    "music_type": result.get("type") or "",
+                    "subscribe_id": int(result.get("id") or 0),
+                    "keyword": result.get("keyword") or "",
+                    "source": result.get("source") or "",
+                    "media_id": str(result.get("media_id") or ""),
+                    "links": result.get("links") or {},
+                    "origin": record.get("source") or "",
+                    "playlist": record.get("playlist") or "",
+                    "user": self._subscribe_user,
+                    "time": now,
+                })
             else:
                 record["subscribe_message"] = result.get("message") or ""
                 updates.append(record)
@@ -468,14 +484,17 @@ class MusicSubscribe(_PluginBase):
         self._store().apply(updates)
         if done_seqs:
             self._store().remove(done_seqs)
+            self._history_store().add(history_items)
         logger.info(
             f"缺失曲目订阅完成：成功 {succeeded}，失败 {failed}"
-            f"（清单剩余 {self._store().summary()['total']} 条待处理）")
+            f"（清单剩余 {self._store().summary()['total']} 条待处理，"
+            f"订阅历史累计 {self._history_store().summary()['total']} 条）")
         return {
             "code": 0,
             "message": f"订阅完成：成功 {succeeded}，失败 {failed}",
             "results": results,
             "summary": self._store().summary(),
+            "history": self._history_store().summary(),
         }
 
     def api_pending_remove(self, request: dict = None) -> Dict[str, Any]:
@@ -496,6 +515,59 @@ class MusicSubscribe(_PluginBase):
         label = "订阅失败记录" if mode == "failed" else "全部"
         return {"code": 0, "message": f"已清理{label} {removed} 条", "removed": removed,
                 "summary": self._store().summary()}
+
+    def api_pending_link(self, request: dict = None) -> Dict[str, Any]:
+        """查询单条曲目在官方元数据源上的详情页链接（歌曲 / 专辑 / 歌手）。
+
+        body: ``{"seq": 1}``。识别不到身份时返回空链接并说明原因。
+        """
+        data = request if isinstance(request, dict) else {}
+        try:
+            seq = int(data.get("seq"))
+        except (TypeError, ValueError):
+            return {"code": 1, "message": "请指定要查询的序号"}
+        records = self._store().select([seq])
+        if not records:
+            return {"code": 1, "message": "清单里没有对应的记录，可能已被移除"}
+        record = records[0]
+        track = Track(
+            title=record.get("title") or "",
+            artists=[record["artist"]] if record.get("artist") else [],
+            album=record.get("album") or "",
+            duration=int(record.get("duration") or 0),
+        )
+        links = self._subscribes().links(track)
+        if not any(str(value or "") for value in links.values()):
+            return {"code": 1, "message": "没查到官方详情链接（该曲目未被识别出身份）",
+                    "seq": seq, "links": links}
+        return {"code": 0, "seq": seq, "title": record.get("title") or "", "links": links}
+
+    # ------------------------------------------------------------------
+    # 订阅历史接口
+    # ------------------------------------------------------------------
+
+    def api_history(self, keyword: str = "") -> Dict[str, Any]:
+        """订阅历史：只含订阅成功的条目。"""
+        items = self._history_store().records()
+        word = (keyword or "").strip().lower()
+        if word:
+            items = [
+                item for item in items
+                if word in str(item.get("title") or "").lower()
+                or word in str(item.get("artist") or "").lower()
+                or word in str(item.get("album") or "").lower()
+            ]
+        return {
+            "code": 0,
+            "items": items,
+            "summary": self._history_store().summary(),
+        }
+
+    def api_history_clear(self) -> Dict[str, Any]:
+        """清空订阅历史（不影响宿主的订阅列表）。"""
+        removed = self._history_store().clear()
+        return {"code": 0, "message": f"已清空订阅历史 {removed} 条", "removed": removed,
+                "summary": self._history_store().summary()}
 
     # ------------------------------------------------------------------
     # 同步主干

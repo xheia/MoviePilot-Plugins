@@ -100,7 +100,7 @@ const DEFAULTS = {
   cron: '',
   media_server: [],
   exact_match: true,
-  douban_source: true,
+  subscribe_user: '歌单订阅',
   ncm_api_url: '',
   wymusic_paths: '',
   wy_daily_list: false,
@@ -463,23 +463,20 @@ return (_ctx, _cache) => {
                   ]),
                   _createVNode(_component_v_divider),
                   _createElementVNode("section", _hoisted_13, [
-                    _cache[27] || (_cache[27] = _createElementVNode("h3", { class: "ms-section__title" }, "缺失曲目订阅", -1)),
-                    _createVNode(_component_v_switch, {
-                      modelValue: form.douban_source,
-                      "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((form.douban_source) = $event)),
-                      color: "primary",
-                      inset: ""
-                    }, {
-                      label: _withCtx(() => [...(_cache[26] || (_cache[26] = [
-                        _createElementVNode("span", { class: "ms-label" }, "使用豆瓣音乐源搜索缺失曲目", -1)
-                      ]))]),
-                      _: 1
-                    }, 8, ["modelValue"]),
-                    _cache[28] || (_cache[28] = _createElementVNode("p", { class: "ms-hint" }, "缺失曲目的搜索、识别、订阅都走宿主的官方音乐接口； 开启后额外带上豆瓣音乐源（中文曲库命中率更高），关闭则按宿主的音乐元数据源设置搜索。", -1))
+                    _cache[26] || (_cache[26] = _createElementVNode("h3", { class: "ms-section__title" }, "缺失曲目订阅", -1)),
+                    _createVNode(_component_v_text_field, {
+                      modelValue: form.subscribe_user,
+                      "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((form.subscribe_user) = $event)),
+                      label: "订阅人",
+                      placeholder: "歌单订阅",
+                      hint: "写到宿主订阅记录的「用户」栏位上，便于在订阅列表里区分是谁订的",
+                      "persistent-hint": ""
+                    }, null, 8, ["modelValue"]),
+                    _cache[27] || (_cache[27] = _createElementVNode("p", { class: "ms-hint" }, "缺失曲目的搜索、识别、订阅都走宿主的官方音乐接口，插件不指定任何音乐来源 （搜哪些库由宿主自己的音乐元数据源设置决定）。", -1))
                   ]),
                   _createVNode(_component_v_divider),
                   _createElementVNode("section", _hoisted_14, [
-                    _cache[30] || (_cache[30] = _createElementVNode("h3", { class: "ms-section__title" }, "媒体服务器", -1)),
+                    _cache[29] || (_cache[29] = _createElementVNode("h3", { class: "ms-section__title" }, "媒体服务器", -1)),
                     _createVNode(_component_v_select, {
                       modelValue: form.media_server,
                       "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((form.media_server) = $event)),
@@ -490,25 +487,25 @@ return (_ctx, _cache) => {
                       label: "同步到哪些媒体服务器",
                       placeholder: "请选择已启用的媒体服务器"
                     }, null, 8, ["modelValue", "items"]),
-                    _cache[31] || (_cache[31] = _createElementVNode("p", { class: "ms-hint" }, "列表来自「设置 → 媒体服务器」里已启用的服务器，支持多选。", -1)),
+                    _cache[30] || (_cache[30] = _createElementVNode("p", { class: "ms-hint" }, "列表来自「设置 → 媒体服务器」里已启用的服务器，支持多选。", -1)),
                     _createVNode(_component_v_switch, {
                       modelValue: form.exact_match,
                       "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((form.exact_match) = $event)),
                       color: "primary",
                       inset: ""
                     }, {
-                      label: _withCtx(() => [...(_cache[29] || (_cache[29] = [
+                      label: _withCtx(() => [...(_cache[28] || (_cache[28] = [
                         _createElementVNode("span", { class: "ms-label" }, "曲目精确匹配", -1)
                       ]))]),
                       _: 1
                     }, 8, ["modelValue"]),
-                    _cache[32] || (_cache[32] = _createElementVNode("p", { class: "ms-hint" }, "开启时按「歌名 + 歌手」精确判断曲库是否已存在；关闭后仅按歌名模糊匹配， 匹配更宽松但可能并入同名不同版本的曲目。", -1))
+                    _cache[31] || (_cache[31] = _createElementVNode("p", { class: "ms-hint" }, "开启时按「歌名 + 歌手」精确判断曲库是否已存在；关闭后仅按歌名模糊匹配， 匹配更宽松但可能并入同名不同版本的曲目。", -1))
                   ])
                 ], 64))
               : (tab.value === 'netease')
                 ? (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
                     _createElementVNode("section", _hoisted_15, [
-                      _cache[34] || (_cache[34] = _createElementVNode("h3", { class: "ms-section__title" }, "ncm-api 服务", -1)),
+                      _cache[33] || (_cache[33] = _createElementVNode("h3", { class: "ms-section__title" }, "ncm-api 服务", -1)),
                       _createElementVNode("div", _hoisted_16, [
                         _createVNode(_component_v_text_field, {
                           modelValue: form.ncm_api_url,
@@ -523,13 +520,13 @@ return (_ctx, _cache) => {
                           loading: probing.value,
                           onClick: probe
                         }, {
-                          default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
+                          default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
                             _createTextVNode("探测连通性", -1)
                           ]))]),
                           _: 1
                         }, 8, ["loading"])
                       ]),
-                      _cache[35] || (_cache[35] = _createElementVNode("p", { class: "ms-hint" }, "网易云的登录与取数都通过本地部署的 ncm-api 容器完成； 容器内的 3000 端口建议映射到宿主的 1630 端口，避免和 MoviePilot 冲突。", -1)),
+                      _cache[34] || (_cache[34] = _createElementVNode("p", { class: "ms-hint" }, "网易云的登录与取数都通过本地部署的 ncm-api 容器完成； 容器内的 3000 端口建议映射到宿主的 1630 端口，避免和 MoviePilot 冲突。", -1)),
                       (probeResult.value)
                         ? (_openBlock(), _createBlock(_component_v_alert, {
                             key: 0,
@@ -547,7 +544,7 @@ return (_ctx, _cache) => {
                     ]),
                     _createVNode(_component_v_divider),
                     _createElementVNode("section", _hoisted_17, [
-                      _cache[38] || (_cache[38] = _createElementVNode("h3", { class: "ms-section__title" }, "登录", -1)),
+                      _cache[37] || (_cache[37] = _createElementVNode("h3", { class: "ms-section__title" }, "登录", -1)),
                       _createElementVNode("div", _hoisted_18, [
                         _createElementVNode("span", {
                           class: _normalizeClass(['ms-chip', loggedIn.value ? 'ms-chip--ok' : 'ms-chip--muted'])
@@ -567,7 +564,7 @@ return (_ctx, _cache) => {
                           loading: logouting.value,
                           onClick: logout
                         }, {
-                          default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
+                          default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
                             _createTextVNode("退出登录", -1)
                           ]))]),
                           _: 1
@@ -581,7 +578,7 @@ return (_ctx, _cache) => {
                         loading: qrLoading.value,
                         onClick: getQrcode
                       }, {
-                        default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
+                        default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
                           _createTextVNode("获取二维码", -1)
                         ]))]),
                         _: 1
@@ -614,7 +611,7 @@ return (_ctx, _cache) => {
                 : (tab.value === 'sources')
                   ? (_openBlock(), _createElementBlock(_Fragment, { key: 2 }, [
                       _createElementVNode("section", _hoisted_23, [
-                        _cache[41] || (_cache[41] = _createElementVNode("h3", { class: "ms-section__title" }, "网易云歌单", -1)),
+                        _cache[40] || (_cache[40] = _createElementVNode("h3", { class: "ms-section__title" }, "网易云歌单", -1)),
                         _createVNode(_component_v_textarea, {
                           modelValue: form.wymusic_paths,
                           "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((form.wymusic_paths) = $event)),
@@ -623,7 +620,7 @@ return (_ctx, _cache) => {
                           label: "歌单同步设置",
                           placeholder: "每行一条：歌单ID:播放列表名称[:emby用户名]"
                         }, null, 8, ["modelValue"]),
-                        _cache[42] || (_cache[42] = _createElementVNode("p", { class: "ms-hint" }, [
+                        _cache[41] || (_cache[41] = _createElementVNode("p", { class: "ms-hint" }, [
                           _createTextVNode(" 示例："),
                           _createElementVNode("code", null, "2388086885:我喜欢的音乐"),
                           _createTextVNode("；Emby 多用户隔离时写 "),
@@ -636,7 +633,7 @@ return (_ctx, _cache) => {
                           color: "primary",
                           inset: ""
                         }, {
-                          label: _withCtx(() => [...(_cache[39] || (_cache[39] = [
+                          label: _withCtx(() => [...(_cache[38] || (_cache[38] = [
                             _createElementVNode("span", { class: "ms-label" }, "同步每日推荐歌单", -1)
                           ]))]),
                           _: 1
@@ -647,16 +644,16 @@ return (_ctx, _cache) => {
                           color: "primary",
                           inset: ""
                         }, {
-                          label: _withCtx(() => [...(_cache[40] || (_cache[40] = [
+                          label: _withCtx(() => [...(_cache[39] || (_cache[39] = [
                             _createElementVNode("span", { class: "ms-label" }, "同步每日推荐歌曲", -1)
                           ]))]),
                           _: 1
                         }, 8, ["modelValue"]),
-                        _cache[43] || (_cache[43] = _createElementVNode("p", { class: "ms-hint" }, "每日推荐需要网易云登录态，未登录时该任务会跳过并在日志里说明原因。", -1))
+                        _cache[42] || (_cache[42] = _createElementVNode("p", { class: "ms-hint" }, "每日推荐需要网易云登录态，未登录时该任务会跳过并在日志里说明原因。", -1))
                       ]),
                       _createVNode(_component_v_divider),
                       _createElementVNode("section", _hoisted_24, [
-                        _cache[44] || (_cache[44] = _createElementVNode("h3", { class: "ms-section__title" }, "QQ 音乐歌单", -1)),
+                        _cache[43] || (_cache[43] = _createElementVNode("h3", { class: "ms-section__title" }, "QQ 音乐歌单", -1)),
                         _createVNode(_component_v_textarea, {
                           modelValue: form.qqmusic_paths,
                           "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((form.qqmusic_paths) = $event)),
@@ -668,7 +665,7 @@ return (_ctx, _cache) => {
                       ]),
                       _createVNode(_component_v_divider),
                       _createElementVNode("section", _hoisted_25, [
-                        _cache[45] || (_cache[45] = _createElementVNode("h3", { class: "ms-section__title" }, "汽水音乐歌单", -1)),
+                        _cache[44] || (_cache[44] = _createElementVNode("h3", { class: "ms-section__title" }, "汽水音乐歌单", -1)),
                         _createVNode(_component_v_textarea, {
                           modelValue: form.qishui_paths,
                           "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((form.qishui_paths) = $event)),
@@ -677,7 +674,7 @@ return (_ctx, _cache) => {
                           label: "歌单同步设置",
                           placeholder: "每行一条：分享链接:播放列表名称[:emby用户名]"
                         }, null, 8, ["modelValue"]),
-                        _cache[46] || (_cache[46] = _createElementVNode("p", { class: "ms-hint" }, "粘贴汽水音乐 App 里复制的歌单分享链接即可。", -1))
+                        _cache[45] || (_cache[45] = _createElementVNode("p", { class: "ms-hint" }, "粘贴汽水音乐 App 里复制的歌单分享链接即可。", -1))
                       ])
                     ], 64))
                   : (_openBlock(), _createElementBlock(_Fragment, { key: 3 }, [
@@ -688,7 +685,7 @@ return (_ctx, _cache) => {
                               type: "info",
                               variant: "tonal"
                             }, {
-                              default: _withCtx(() => [...(_cache[47] || (_cache[47] = [
+                              default: _withCtx(() => [...(_cache[46] || (_cache[46] = [
                                 _createTextVNode("还没有同步记录，配置保存后手动运行一次即可。", -1)
                               ]))]),
                               _: 1
@@ -698,19 +695,19 @@ return (_ctx, _cache) => {
                             _createElementVNode("div", _hoisted_28, [
                               _createElementVNode("div", _hoisted_29, [
                                 _createElementVNode("span", _hoisted_30, _toDisplayString(stats.value.duration || 0), 1),
-                                _cache[48] || (_cache[48] = _createElementVNode("span", { class: "ms-stat__label" }, "耗时（秒）", -1))
+                                _cache[47] || (_cache[47] = _createElementVNode("span", { class: "ms-stat__label" }, "耗时（秒）", -1))
                               ]),
                               _createElementVNode("div", _hoisted_31, [
                                 _createElementVNode("span", _hoisted_32, _toDisplayString(stats.value.missing || 0), 1),
-                                _cache[49] || (_cache[49] = _createElementVNode("span", { class: "ms-stat__label" }, "库内缺失", -1))
+                                _cache[48] || (_cache[48] = _createElementVNode("span", { class: "ms-stat__label" }, "库内缺失", -1))
                               ]),
                               _createElementVNode("div", _hoisted_33, [
                                 _createElementVNode("span", _hoisted_34, _toDisplayString((stats.value.playlists || []).length), 1),
-                                _cache[50] || (_cache[50] = _createElementVNode("span", { class: "ms-stat__label" }, "歌单数", -1))
+                                _cache[49] || (_cache[49] = _createElementVNode("span", { class: "ms-stat__label" }, "歌单数", -1))
                               ]),
                               _createElementVNode("div", _hoisted_35, [
                                 _createElementVNode("span", _hoisted_36, _toDisplayString(addedTotal.value), 1),
-                                _cache[51] || (_cache[51] = _createElementVNode("span", { class: "ms-stat__label" }, "新增曲目", -1))
+                                _cache[50] || (_cache[50] = _createElementVNode("span", { class: "ms-stat__label" }, "新增曲目", -1))
                               ])
                             ]),
                             _createElementVNode("p", _hoisted_37, [
@@ -721,7 +718,7 @@ return (_ctx, _cache) => {
                             ]),
                             ((stats.value.playlists || []).length)
                               ? (_openBlock(), _createElementBlock("table", _hoisted_39, [
-                                  _cache[52] || (_cache[52] = _createElementVNode("thead", null, [
+                                  _cache[51] || (_cache[51] = _createElementVNode("thead", null, [
                                     _createElementVNode("tr", null, [
                                       _createElementVNode("th", null, "数据源"),
                                       _createElementVNode("th", null, "播放列表"),
@@ -764,7 +761,7 @@ return (_ctx, _cache) => {
         loading: running.value,
         onClick: runOnce
       }, {
-        default: _withCtx(() => [...(_cache[53] || (_cache[53] = [
+        default: _withCtx(() => [...(_cache[52] || (_cache[52] = [
           _createTextVNode("立即运行一次", -1)
         ]))]),
         _: 1
@@ -775,7 +772,7 @@ return (_ctx, _cache) => {
         "prepend-icon": "mdi-format-list-bulleted",
         onClick: _cache[13] || (_cache[13] = $event => (emit('switch')))
       }, {
-        default: _withCtx(() => [...(_cache[54] || (_cache[54] = [
+        default: _withCtx(() => [...(_cache[53] || (_cache[53] = [
           _createTextVNode("查看缺失清单", -1)
         ]))]),
         _: 1
@@ -786,6 +783,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const ConfigComponent = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-f57bb8e2"]]);
+const ConfigComponent = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-3b13988e"]]);
 
 export { ConfigComponent as default };

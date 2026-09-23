@@ -58,11 +58,10 @@
 
           <section class="ms-section">
             <h3 class="ms-section__title">缺失曲目订阅</h3>
-            <v-switch v-model="form.douban_source" color="primary" inset>
-              <template #label><span class="ms-label">使用豆瓣音乐源搜索缺失曲目</span></template>
-            </v-switch>
-            <p class="ms-hint">缺失曲目的搜索、识别、订阅都走宿主的官方音乐接口；
-              开启后额外带上豆瓣音乐源（中文曲库命中率更高），关闭则按宿主的音乐元数据源设置搜索。</p>
+            <v-text-field v-model="form.subscribe_user" label="订阅人" placeholder="歌单订阅"
+              hint="写到宿主订阅记录的「用户」栏位上，便于在订阅列表里区分是谁订的" persistent-hint />
+            <p class="ms-hint">缺失曲目的搜索、识别、订阅都走宿主的官方音乐接口，插件不指定任何音乐来源
+              （搜哪些库由宿主自己的音乐元数据源设置决定）。</p>
           </section>
 
           <v-divider />
@@ -237,7 +236,7 @@ const DEFAULTS = {
   cron: '',
   media_server: [],
   exact_match: true,
-  douban_source: true,
+  subscribe_user: '歌单订阅',
   ncm_api_url: '',
   wymusic_paths: '',
   wy_daily_list: false,

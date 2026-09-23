@@ -15,6 +15,11 @@ PENDING_KEY = "pending_tracks"
 #: 清单条数上限，超出后丢弃最早的条目
 PENDING_LIMIT = 1000
 
+#: 订阅历史的数据键名
+HISTORY_KEY = "subscribe_history"
+#: 历史条数上限，超出后丢弃最早的记录
+HISTORY_LIMIT = 1000
+
 
 def pending_key(title: str, artist: str = "") -> str:
     """去重键：同一首歌被多个歌单判定为缺失时只保留一条。"""
@@ -169,10 +174,78 @@ class PendingStore:
         return len(records) - len(kept)
 
     def summary(self) -> Dict[str, int]:
-        """清单概览：总条数与其中订阅失败的条数（订阅成功即移出清单）。"""
+        """清单概览：总条数与其中订阅失败的条数（订阅成功即移入订阅历史）。"""
         records = self.records()
         failed = len([item for item in records if (item.get("subscribe_message") or "")])
         return {
             "total": len(records),
             "failed": failed,
+        }
+
+
+class HistoryStore:
+    """订阅历史：只记录订阅成功的条目。
+
+    订阅成功后该行从待订阅清单移出，改在这里留档（含订阅 ID、粒度、来源身份
+    与官方详情页链接），方便回看"这首是怎么订上的"以及直接点链接去核对。
+    """
+
+    def __init__(self, get_data: Callable[[str], Any],
+                 save_data: Callable[[str, Any], None]) -> None:
+        self._get_data = get_data
+        self._save_data = save_data
+
+    def records(self) -> List[Dict[str, Any]]:
+        """读取全部历史（新的在前）。"""
+        raw = self._get_data(HISTORY_KEY)
+        if not isinstance(raw, list):
+            return []
+        items = [item for item in raw if isinstance(item, dict)]
+        items.reverse()
+        return items
+
+    def _records_chronological(self) -> List[Dict[str, Any]]:
+        """按写入顺序（旧的在前）读取，供追加时使用。"""
+        raw = self._get_data(HISTORY_KEY)
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, dict)]
+
+    def save(self, records: List[Dict[str, Any]]) -> None:
+        """写回历史并按上限裁剪（保留最新的部分）。"""
+        if len(records) > HISTORY_LIMIT:
+            records = records[-HISTORY_LIMIT:]
+        self._save_data(HISTORY_KEY, records)
+
+    def add(self, items: List[Dict[str, Any]]) -> int:
+        """追加历史记录，返回写入条数。"""
+        if not items:
+            return 0
+        records = self._records_chronological()
+        seq = 0
+        for item in records:
+            try:
+                seq = max(seq, int(item.get("seq") or 0))
+            except (TypeError, ValueError):
+                continue
+        for item in items:
+            seq += 1
+            item["seq"] = seq
+            records.append(item)
+        self.save(records)
+        return len(items)
+
+    def clear(self) -> int:
+        """清空订阅历史，返回被清掉的条数。"""
+        records = self._records_chronological()
+        self.save([])
+        return len(records)
+
+    def summary(self) -> Dict[str, int]:
+        """历史概览：条数与按订阅粒度分类的条数。"""
+        records = self.records()
+        return {
+            "total": len(records),
+            "song": len([item for item in records if item.get("target") == "song"]),
+            "album": len([item for item in records if item.get("target") == "album"]),
         }

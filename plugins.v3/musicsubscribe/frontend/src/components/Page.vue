@@ -21,12 +21,26 @@
       </div>
     </header>
 
+    <!-- 视图切换 -->
+    <div class="ms-tabs">
+      <button type="button" :class="['ms-tab', { 'ms-tab--active': view === 'pending' }]"
+        @click="switchView('pending')">待订阅清单</button>
+      <button type="button" :class="['ms-tab', { 'ms-tab--active': view === 'history' }]"
+        @click="switchView('history')">订阅历史</button>
+    </div>
+
     <!-- 概览 -->
     <div class="ms-stats">
       <button v-for="s in statCards" :key="s.key" type="button"
-        :class="['ms-stat', { 'ms-stat--active': scope === s.key }]" @click="scope = s.key">
+        :class="['ms-stat', { 'ms-stat--active': view === 'pending' && scope === s.key }]"
+        @click="switchScope(s.key)">
         <span class="ms-stat__num">{{ s.count }}</span>
         <span class="ms-stat__label">{{ s.label }}</span>
+      </button>
+      <button type="button" :class="['ms-stat', { 'ms-stat--active': view === 'history' }]"
+        @click="switchView('history')">
+        <span class="ms-stat__num">{{ historySummary.total }}</span>
+        <span class="ms-stat__label">订阅历史</span>
       </button>
       <div class="ms-stat ms-stat--plain">
         <span class="ms-stat__num">{{ syncMissing }}</span>
@@ -40,7 +54,7 @@
 
     <!-- 工具条 -->
     <div class="ms-toolbar">
-      <div class="ms-toolbar__group">
+      <div v-if="view === 'pending'" class="ms-toolbar__group">
         <v-btn size="small" variant="tonal" @click="selectAll('song')">全选</v-btn>
         <v-btn size="small" variant="tonal" @click="invert">
           反选
@@ -50,16 +64,20 @@
         <v-btn size="small" variant="text" :disabled="!pickedCount" @click="clearPick">清空选择</v-btn>
       </div>
       <v-text-field v-model="keyword" class="ms-toolbar__search" density="compact" variant="outlined"
-        placeholder="搜索歌名 / 歌手 / 专辑" prepend-inner-icon="mdi-magnify" hide-details single-line />
-      <v-select v-model="sourceFilter" :items="sourceOptions" class="ms-toolbar__source" density="compact"
-        variant="outlined" label="数据源" hide-details single-line clearable />
+        :placeholder="view === 'history' ? '搜索订阅历史：歌名 / 歌手 / 专辑' : '搜索歌名 / 歌手 / 专辑'"
+        prepend-inner-icon="mdi-magnify" hide-details single-line />
+      <v-select v-if="view === 'pending'" v-model="sourceFilter" :items="sourceOptions"
+        class="ms-toolbar__source" density="compact" variant="outlined" label="数据源" hide-details
+        single-line clearable />
+      <v-select v-else v-model="targetFilter" :items="targetOptions" class="ms-toolbar__source"
+        density="compact" variant="outlined" label="订阅粒度" hide-details single-line clearable />
     </div>
 
     <!-- 清单表格 -->
     <div class="ms-body">
       <div v-if="loading" class="ms-empty">加载中…</div>
       <template v-else>
-        <table v-if="pagedRows.length" class="ms-table">
+        <table v-if="view === 'pending' && pagedRows.length" class="ms-table">
           <thead>
             <tr>
               <th class="col-seq">序号</th>
@@ -69,6 +87,7 @@
               <th class="col-dur">时长</th>
               <th>歌手</th>
               <th>专辑名称</th>
+              <th class="col-link">官方链接</th>
             </tr>
           </thead>
           <tbody>
@@ -94,6 +113,60 @@
               <td class="col-dur">{{ row.duration_text || '-' }}</td>
               <td>{{ row.artist || '-' }}</td>
               <td>{{ row.album || '-' }}</td>
+              <td class="col-link">
+                <button v-if="!linkCache[row.seq]" type="button" class="ms-linkbtn"
+                  :disabled="linking === row.seq" @click="loadLink(row)">
+                  {{ linking === row.seq ? '查询中…' : '查询链接' }}
+                </button>
+                <template v-else>
+                  <span v-for="l in linkEntries(linkCache[row.seq])" :key="`${row.seq}-${l.key}`">
+                    <a v-if="l.url" :href="l.url" target="_blank" rel="noopener">{{ l.label }}</a>
+                    <span v-else class="ms-link-off">{{ l.label }}</span>
+                  </span>
+                </template>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- 订阅历史 -->
+        <table v-else-if="view === 'history' && pagedRows.length" class="ms-table">
+          <thead>
+            <tr>
+              <th class="col-seq">序号</th>
+              <th>歌曲名称</th>
+              <th>歌手</th>
+              <th>专辑名称</th>
+              <th class="col-dur">时长</th>
+              <th class="col-pick">粒度</th>
+              <th>订阅人</th>
+              <th class="col-time">订阅时间</th>
+              <th class="col-link">官方链接</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in pagedRows" :key="`h-${row.seq}`">
+              <td class="col-seq">{{ row.seq }}</td>
+              <td>
+                <div class="ms-title">{{ row.title }}</div>
+                <div class="ms-sub">
+                  <span class="ms-src">{{ row.playlist || row.origin || '歌单' }}</span>
+                  <span v-if="row.subscribe_id"> · 订阅 #{{ row.subscribe_id }}</span>
+                  <span v-else-if="row.message"> · {{ row.message }}</span>
+                </div>
+              </td>
+              <td>{{ row.artist || '-' }}</td>
+              <td>{{ row.album || '-' }}</td>
+              <td class="col-dur">{{ row.duration_text || '-' }}</td>
+              <td class="col-pick">{{ row.target === 'album' ? '专辑' : '歌曲' }}</td>
+              <td>{{ row.user || '-' }}</td>
+              <td class="col-time">{{ row.time || '-' }}</td>
+              <td class="col-link">
+                <span v-for="l in linkEntries(row.links)" :key="`h-${row.seq}-${l.key}`">
+                  <a v-if="l.url" :href="l.url" target="_blank" rel="noopener">{{ l.label }}</a>
+                  <span v-else class="ms-link-off">{{ l.label }}</span>
+                </span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -101,6 +174,9 @@
         <v-alert v-else-if="keyword || sourceFilter" density="compact" type="info" variant="tonal">
           没有匹配的记录，换个关键词试试。
         </v-alert>
+        <div v-else-if="view === 'history'" class="ms-empty">
+          还没有订阅历史 —— 在「待订阅清单」里勾选曲目点「订阅」，成功的条目会留档在这里。
+        </div>
         <div v-else class="ms-empty">
           清单是空的 —— 先跑一次歌单同步，媒体库里搜不到的曲目会出现在这里。
         </div>
@@ -117,7 +193,7 @@
     </div>
 
     <!-- 底部动作 -->
-    <footer class="ms-foot">
+    <footer v-if="view === 'pending'" class="ms-foot">
       <span class="ms-foot__count">已勾选 {{ pickedCount }} 条（歌曲 {{ countByTarget.song }} / 专辑
         {{ countByTarget.album }}）</span>
       <v-spacer />
@@ -134,6 +210,13 @@
         :loading="removing" @click="removePicked">移除</v-btn>
       <v-btn color="primary" variant="flat" prepend-icon="mdi-bell-plus-outline" :disabled="!pickedCount"
         :loading="subscribing" @click="subscribePicked">订阅</v-btn>
+    </footer>
+    <footer v-else class="ms-foot">
+      <span class="ms-foot__count">共 {{ historySummary.total }} 条订阅历史（歌曲
+        {{ historySummary.song }} / 专辑 {{ historySummary.album }}），清理历史不会影响宿主的订阅列表</span>
+      <v-spacer />
+      <v-btn variant="tonal" color="warning" prepend-icon="mdi-broom"
+        :disabled="!historySummary.total" :loading="clearingHistory" @click="clearHistory">清空历史</v-btn>
     </footer>
   </section>
 </template>
@@ -152,14 +235,25 @@ const PLUGIN = 'plugin/MusicSubscribe'
 const loading = ref(false)
 const subscribing = ref(false)
 const removing = ref(false)
+const clearingHistory = ref(false)
+const linking = ref(null)
 const error = ref('')
 const result = ref('')
 const resultLevel = ref('success')
 
+// pending = 待订阅清单，history = 订阅历史
+const view = ref('pending')
+
 const items = ref([])
+const historyItems = ref([])
 const summary = reactive({ total: 0, failed: 0 })
+const historySummary = reactive({ total: 0, song: 0, album: 0 })
 const stats = ref({})
 const targets = ref([{ value: 'song', label: '歌曲' }, { value: 'album', label: '专辑' }])
+const targetOptions = [{ value: 'song', label: '歌曲' }, { value: 'album', label: '专辑' }]
+const targetFilter = ref(null)
+// seq -> { song, album, artist }（按需查询，避免同步时给每首歌都做一次识别）
+const linkCache = reactive({})
 
 const scope = ref('all')
 const keyword = ref('')
@@ -182,7 +276,7 @@ const sourceOptions = computed(() => {
   return [...set]
 })
 
-const rows = computed(() => {
+const pendingRows = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
   let list = items.value
   if (scope.value === 'failed') list = list.filter(i => !!(i.subscribe_message || ''))
@@ -195,6 +289,21 @@ const rows = computed(() => {
   }
   return list
 })
+
+const historyRows = computed(() => {
+  const kw = keyword.value.trim().toLowerCase()
+  let list = historyItems.value
+  if (targetFilter.value) list = list.filter(i => (i.target || 'song') === targetFilter.value)
+  if (kw) {
+    list = list.filter(i =>
+      String(i.title || '').toLowerCase().includes(kw) ||
+      String(i.artist || '').toLowerCase().includes(kw) ||
+      String(i.album || '').toLowerCase().includes(kw))
+  }
+  return list
+})
+
+const rows = computed(() => (view.value === 'history' ? historyRows.value : pendingRows.value))
 
 const pageCount = computed(() => Math.max(1, Math.ceil(rows.value.length / Number(pageSize.value))))
 const pagedRows = computed(() => {
@@ -224,16 +333,19 @@ function call(method, path, data) {
 }
 
 async function load() {
+  if (view.value === 'history') return loadHistory()
   loading.value = true
   error.value = ''
   try {
     const res = await call('get', `${PLUGIN}/pending?scope=${encodeURIComponent(scope.value)}`)
     items.value = Array.isArray(res?.items) ? res.items : []
     Object.assign(summary, res?.summary || { total: 0, failed: 0 })
+    Object.assign(historySummary, res?.history || { total: 0, song: 0, album: 0 })
     stats.value = res?.stats || {}
     if (Array.isArray(res?.targets) && res.targets.length) targets.value = res.targets
     const alive = new Set(items.value.map(i => Number(i.seq)))
     Object.keys(picks).forEach(seq => { if (!alive.has(Number(seq))) delete picks[seq] })
+    Object.keys(linkCache).forEach(seq => { if (!alive.has(Number(seq))) delete linkCache[seq] })
     if (page.value > pageCount.value) page.value = pageCount.value
   } catch (e) {
     error.value = '加载缺失清单失败：' + (e?.message || e)
@@ -244,6 +356,73 @@ async function load() {
   }
 }
 
+async function loadHistory() {
+  loading.value = true
+  error.value = ''
+  try {
+    const res = await call('get', `${PLUGIN}/history`)
+    historyItems.value = Array.isArray(res?.items) ? res.items : []
+    Object.assign(historySummary, res?.summary || { total: 0, song: 0, album: 0 })
+    if (page.value > pageCount.value) page.value = pageCount.value
+  } catch (e) {
+    error.value = '加载订阅历史失败：' + (e?.message || e)
+    historyItems.value = []
+  } finally {
+    loading.value = false
+    emit('action')
+  }
+}
+
+function switchView(next) {
+  if (view.value === next) return load()
+  view.value = next
+  page.value = 1
+  keyword.value = ''
+  return load()
+}
+
+function switchScope(next) {
+  view.value = 'pending'
+  scope.value = next
+}
+
+async function loadLink(row) {
+  const seq = Number(row.seq)
+  linking.value = seq
+  result.value = ''
+  try {
+    const res = await call('post', `${PLUGIN}/pending/link`, { seq })
+    if (res?.code === 0) {
+      linkCache[seq] = res.links || {}
+    } else {
+      resultLevel.value = 'warning'
+      result.value = res?.message || '没查到官方链接'
+    }
+  } catch (e) {
+    resultLevel.value = 'error'
+    result.value = '查询链接失败：' + (e?.message || e)
+  } finally {
+    linking.value = null
+  }
+}
+
+async function clearHistory() {
+  clearingHistory.value = true
+  result.value = ''
+  try {
+    const res = await call('post', `${PLUGIN}/history/clear`)
+    resultLevel.value = res?.code === 0 ? 'success' : 'error'
+    result.value = res?.message || '已清空订阅历史'
+    historyItems.value = []
+    Object.assign(historySummary, res?.summary || { total: 0, song: 0, album: 0 })
+  } catch (e) {
+    resultLevel.value = 'error'
+    result.value = '清空订阅历史失败：' + (e?.message || e)
+  } finally {
+    clearingHistory.value = false
+  }
+}
+
 function pick(row, target) {
   const seq = Number(row.seq)
   // 同一序号歌曲与专辑二选一：再次勾选时切换粒度
@@ -251,11 +430,11 @@ function pick(row, target) {
 }
 
 function selectAll() {
-  rows.value.forEach(row => { picks[Number(row.seq)] = 'song' })
+  pendingRows.value.forEach(row => { picks[Number(row.seq)] = 'song' })
 }
 
 function invert() {
-  rows.value.forEach(row => {
+  pendingRows.value.forEach(row => {
     const seq = Number(row.seq)
     const cur = picks[seq]
     if (!cur) picks[seq] = 'song'
@@ -265,7 +444,16 @@ function invert() {
 }
 
 function clearPick() {
-  rows.value.forEach(row => { delete picks[Number(row.seq)] })
+  pendingRows.value.forEach(row => { delete picks[Number(row.seq)] })
+}
+
+function linkEntries(links) {
+  const got = links || {}
+  return [
+    { key: 'song', label: '歌曲', url: got.song || '' },
+    { key: 'album', label: '专辑', url: got.album || '' },
+    { key: 'artist', label: '歌手', url: got.artist || '' },
+  ]
 }
 
 async function subscribePicked() {
@@ -283,7 +471,7 @@ async function subscribePicked() {
       const detail = failed.map(f => `${f.title}（${f.message}）`).slice(0, 3).join('；')
       resultLevel.value = failed.length ? 'warning' : 'success'
       result.value = failed.length
-        ? `订阅完成：${payload.length - failed.length} 条已推送订阅并从清单移除，${failed.length} 条失败：${detail}`
+        ? `订阅完成：${payload.length - failed.length} 条订阅成功（可在「订阅历史」里查看），${failed.length} 条失败：${detail}`
         : (res.message || '订阅完成')
       clearPick()
       await load()
@@ -340,7 +528,7 @@ async function clearPending(sc) {
   }
 }
 
-watch([scope, keyword, sourceFilter, pageSize], () => { page.value = 1 })
+watch([scope, keyword, sourceFilter, targetFilter, pageSize], () => { page.value = 1 })
 watch(scope, load)
 
 onMounted(load)
@@ -399,6 +587,29 @@ onMounted(load)
   align-items: center;
   gap: 6px;
   margin-left: auto;
+}
+
+.ms-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 16px 8px;
+}
+
+.ms-tab {
+  padding: 5px 14px;
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.ms-tab--active {
+  border-color: rgb(var(--v-theme-primary));
+  background: rgba(var(--v-theme-primary), 0.12);
+  color: rgb(var(--v-theme-primary));
+  font-weight: 600;
 }
 
 .ms-stats {
@@ -580,6 +791,50 @@ button.ms-stat {
 
 .ms-foot__count {
   font-size: 0.8rem;
+  color: rgba(var(--v-theme-on-surface), 0.6);
+}
+
+/* 官方详情页链接：歌曲 / 专辑 / 歌手 */
+.col-link {
+  width: 150px;
+  white-space: nowrap;
+}
+
+.col-link a {
+  margin-right: 8px;
+  color: rgb(var(--v-theme-primary));
+  text-decoration: none;
+}
+
+.col-link a:hover {
+  text-decoration: underline;
+}
+
+/* 取不到链接时置灰，保留占位避免列宽跳动 */
+.ms-link-off {
+  margin-right: 8px;
+  color: rgba(var(--v-theme-on-surface), 0.28);
+}
+
+.ms-linkbtn {
+  padding: 2px 8px;
+  border: 1px solid rgba(var(--v-theme-primary), 0.5);
+  border-radius: 6px;
+  background: transparent;
+  color: rgb(var(--v-theme-primary));
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.ms-linkbtn:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.col-time {
+  width: 132px;
+  white-space: nowrap;
+  font-size: 0.78rem;
   color: rgba(var(--v-theme-on-surface), 0.6);
 }
 </style>
