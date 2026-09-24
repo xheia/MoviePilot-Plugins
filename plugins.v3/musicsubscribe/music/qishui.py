@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.sdk.network import RequestUtils
 
+from .rate import Throttle
 from .track import Track, strip_brackets, to_seconds
 
 #: PlaylistOut 公共 API 地址
@@ -19,6 +20,12 @@ DEFAULT_RESOLVER_URL = "https://playlistout-api.lengxiqwq.com"
 
 #: 单次请求超时（秒）
 REQUEST_TIMEOUT = 20
+
+#: 解析服务限流 30 次 / 分钟 → 两次请求至少间隔 2 秒（与其撞上 429 不如自己限速）
+MIN_INTERVAL = 2.0
+
+#: 模块级共享节流器（跨歌单生效）
+_SHARED_THROTTLE = Throttle(MIN_INTERVAL)
 
 #: 从一行配置里提取分享链接
 LINK_RE = re.compile(r"https?://[^\s:：]+")
@@ -41,10 +48,13 @@ def looks_like_qishui_link(text: str) -> bool:
 class QishuiClient:
     """PlaylistOut 解析服务的最小客户端。"""
 
-    def __init__(self, base_url: str = DEFAULT_RESOLVER_URL) -> None:
+    def __init__(self, base_url: str = DEFAULT_RESOLVER_URL,
+                 interval: Optional[float] = None) -> None:
         self.base_url = (base_url or DEFAULT_RESOLVER_URL).strip().rstrip("/")
+        self._throttle = _SHARED_THROTTLE if interval is None else Throttle(interval)
 
     def _get(self, path: str, params: Dict[str, str]) -> Dict[str, Any]:
+        self._throttle.wait()
         response = RequestUtils(timeout=REQUEST_TIMEOUT).get_res(
             url=f"{self.base_url}{path}", params=params)
         status = response.status_code if response is not None else "无响应"
