@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional
 
-from .sourcelink import source_links as _build_source_links
+from .music.sourcelink import source_links as _build_source_links
 
 #: 插件数据键名
 PENDING_KEY = "pending_tracks"
