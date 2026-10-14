@@ -1,0 +1,167 @@
+
+.ms-page[data-v-efb4c1d3] {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: rgb(var(--v-theme-surface));
+  color: rgba(var(--v-theme-on-surface), 0.92);
+}
+.ms-head[data-v-efb4c1d3] {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px 8px;
+}
+.ms-head__brand[data-v-efb4c1d3] {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.ms-head__logo[data-v-efb4c1d3] {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: rgba(var(--v-theme-primary), 0.14);
+  color: rgb(var(--v-theme-primary));
+}
+.ms-head__crumbs[data-v-efb4c1d3] {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 0.72rem;
+  color: rgba(var(--v-theme-on-surface), 0.5);
+}
+.ms-head__title[data-v-efb4c1d3] {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.ms-head__actions[data-v-efb4c1d3] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.ms-tabs[data-v-efb4c1d3] {
+  display: flex;
+  gap: 4px;
+  padding: 0 16px 8px;
+}
+.ms-tab[data-v-efb4c1d3] {
+  padding: 5px 14px;
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.ms-tab--active[data-v-efb4c1d3] {
+  border-color: rgb(var(--v-theme-primary));
+  background: rgba(var(--v-theme-primary), 0.12);
+  color: rgb(var(--v-theme-primary));
+  font-weight: 600;
+}
+.ms-body[data-v-efb4c1d3] {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 16px 16px;
+}
+.ms-search[data-v-efb4c1d3] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 0 12px;
+}
+.ms-search__kw[data-v-efb4c1d3] { flex: 1 1 240px; min-width: 200px;
+}
+.ms-search__pf[data-v-efb4c1d3] { flex: 0 0 220px; min-width: 180px;
+}
+.ms-smart[data-v-efb4c1d3] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 0 12px;
+}
+.ms-smart__title[data-v-efb4c1d3] { flex: 1 1 200px; min-width: 160px;
+}
+.ms-smart__artist[data-v-efb4c1d3] { flex: 0 0 160px; min-width: 140px;
+}
+.ms-smart__kw[data-v-efb4c1d3] { flex: 1 1 240px; min-width: 180px;
+}
+.ms-smart__size[data-v-efb4c1d3] { flex: 0 0 110px; min-width: 90px;
+}
+.ms-hint-inline[data-v-efb4c1d3] {
+  margin: 0 0 12px;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: rgba(var(--v-theme-on-surface), 0.55);
+}
+.ms-table-wrap[data-v-efb4c1d3] {
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.1);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.ms-table[data-v-efb4c1d3] {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+.ms-table th[data-v-efb4c1d3],
+.ms-table td[data-v-efb4c1d3] {
+  padding: 8px 6px;
+  border-bottom: 1px solid rgba(var(--v-theme-on-surface), 0.1);
+  text-align: left;
+  vertical-align: middle;
+}
+.ms-table th[data-v-efb4c1d3] {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: rgb(var(--v-theme-surface));
+  font-weight: 700;
+  color: rgba(var(--v-theme-on-surface), 0.6);
+  white-space: nowrap;
+}
+.ms-title[data-v-efb4c1d3] { font-weight: 600;
+}
+.ms-src[data-v-efb4c1d3] { color: rgba(var(--v-theme-primary), 0.9);
+}
+.col-dur[data-v-efb4c1d3] { width: 66px; white-space: nowrap;
+}
+.col-act[data-v-efb4c1d3] { width: 80px; white-space: nowrap;
+}
+.col-score[data-v-efb4c1d3] { width: 120px;
+}
+.ms-score-num[data-v-efb4c1d3] {
+  display: inline-block;
+  margin-top: 2px;
+  font-size: 0.72rem;
+  color: rgba(var(--v-theme-on-surface), 0.55);
+}
+.col-link[data-v-efb4c1d3] { width: 150px; white-space: nowrap;
+}
+.col-link a[data-v-efb4c1d3] {
+  margin-right: 8px;
+  color: rgb(var(--v-theme-primary));
+  text-decoration: none;
+}
+.col-link a[data-v-efb4c1d3]:hover { text-decoration: underline;
+}
+.ms-link-off[data-v-efb4c1d3] {
+  margin-right: 8px;
+  color: rgba(var(--v-theme-on-surface), 0.28);
+}
+.ms-empty[data-v-efb4c1d3] {
+  padding: 28px 8px;
+  text-align: center;
+  font-size: 0.85rem;
+  color: rgba(var(--v-theme-on-surface), 0.55);
+}

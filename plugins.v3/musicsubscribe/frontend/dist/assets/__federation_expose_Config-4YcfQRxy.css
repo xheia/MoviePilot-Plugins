@@ -1,24 +1,24 @@
 
-.ms-config[data-v-3b13988e] {
+.ms-config[data-v-69a1ef84] {
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: rgb(var(--v-theme-surface));
   color: rgba(var(--v-theme-on-surface), 0.92);
 }
-.ms-head[data-v-3b13988e] {
+.ms-head[data-v-69a1ef84] {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 14px 16px 10px;
 }
-.ms-head__brand[data-v-3b13988e] {
+.ms-head__brand[data-v-69a1ef84] {
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 0;
 }
-.ms-head__logo[data-v-3b13988e] {
+.ms-head__logo[data-v-69a1ef84] {
   display: grid;
   place-items: center;
   width: 34px;
@@ -27,20 +27,20 @@
   background: rgba(var(--v-theme-primary), 0.14);
   color: rgb(var(--v-theme-primary));
 }
-.ms-head__crumbs[data-v-3b13988e] {
+.ms-head__crumbs[data-v-69a1ef84] {
   display: flex;
   align-items: center;
   gap: 2px;
   font-size: 0.72rem;
   color: rgba(var(--v-theme-on-surface), 0.5);
 }
-.ms-head__title[data-v-3b13988e] {
+.ms-head__title[data-v-69a1ef84] {
   margin: 0;
   font-size: 1.05rem;
   font-weight: 700;
   line-height: 1.2;
 }
-.ms-head__actions[data-v-3b13988e] {
+.ms-head__actions[data-v-69a1ef84] {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -48,7 +48,7 @@
   flex-wrap: wrap;
   justify-content: flex-end;
 }
-.ms-chip[data-v-3b13988e] {
+.ms-chip[data-v-69a1ef84] {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -58,94 +58,94 @@
   line-height: 1.4;
   white-space: nowrap;
 }
-.ms-chip--ok[data-v-3b13988e] {
+.ms-chip--ok[data-v-69a1ef84] {
   background: rgba(var(--v-theme-success), 0.14);
   color: rgb(var(--v-theme-success));
 }
-.ms-chip--muted[data-v-3b13988e] {
+.ms-chip--muted[data-v-69a1ef84] {
   background: rgba(var(--v-theme-on-surface), 0.08);
   color: rgba(var(--v-theme-on-surface), 0.6);
 }
-.ms-chip--warn[data-v-3b13988e] {
+.ms-chip--warn[data-v-69a1ef84] {
   background: rgba(var(--v-theme-warning), 0.16);
   color: rgb(var(--v-theme-warning));
 }
-.ms-chip--err[data-v-3b13988e] {
+.ms-chip--err[data-v-69a1ef84] {
   background: rgba(var(--v-theme-error), 0.14);
   color: rgb(var(--v-theme-error));
 }
-.ms-body[data-v-3b13988e] {
+.ms-body[data-v-69a1ef84] {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   padding: 4px 0 8px;
 }
-.ms-section[data-v-3b13988e] {
+.ms-section[data-v-69a1ef84] {
   padding: 16px;
 }
-.ms-section__title[data-v-3b13988e] {
+.ms-section__title[data-v-69a1ef84] {
   margin: 0 0 12px;
   font-size: 0.9rem;
   font-weight: 700;
 }
-.ms-label[data-v-3b13988e] {
+.ms-label[data-v-69a1ef84] {
   font-size: 0.9rem;
 }
-.ms-hint[data-v-3b13988e] {
+.ms-hint[data-v-69a1ef84] {
   margin: 6px 0 0;
   font-size: 0.78rem;
   line-height: 1.6;
   color: rgba(var(--v-theme-on-surface), 0.55);
 }
-.ms-hint code[data-v-3b13988e] {
+.ms-hint code[data-v-69a1ef84] {
   padding: 1px 5px;
   border-radius: 4px;
   background: rgba(var(--v-theme-on-surface), 0.08);
   font-size: 0.76rem;
 }
-.ms-row[data-v-3b13988e] {
+.ms-row[data-v-69a1ef84] {
   display: flex;
   align-items: flex-start;
   gap: 10px;
 }
-.ms-row__grow[data-v-3b13988e] {
+.ms-row__grow[data-v-69a1ef84] {
   flex: 1 1 auto;
 }
-.ms-row__btn[data-v-3b13988e] {
+.ms-row__btn[data-v-69a1ef84] {
   flex: 0 0 auto;
   margin-top: 6px;
 }
-.ms-login-state[data-v-3b13988e] {
+.ms-login-state[data-v-69a1ef84] {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-top: 12px;
   flex-wrap: wrap;
 }
-.ms-qr[data-v-3b13988e] {
+.ms-qr[data-v-69a1ef84] {
   margin-top: 14px;
   padding: 12px;
   border: 1px solid rgba(var(--v-theme-on-surface), 0.12);
   border-radius: 12px;
   text-align: center;
 }
-.ms-qr img[data-v-3b13988e] {
+.ms-qr img[data-v-69a1ef84] {
   width: 180px;
   height: 180px;
   object-fit: contain;
 }
-.ms-qr__tip[data-v-3b13988e] {
+.ms-qr__tip[data-v-69a1ef84] {
   margin-top: 8px;
   font-size: 0.8rem;
   color: rgba(var(--v-theme-on-surface), 0.65);
 }
-.ms-stats[data-v-3b13988e] {
+.ms-stats[data-v-69a1ef84] {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 10px;
   margin-bottom: 12px;
 }
-.ms-stat[data-v-3b13988e] {
+.ms-stat[data-v-69a1ef84] {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -153,42 +153,72 @@
   border: 1px solid rgba(var(--v-theme-on-surface), 0.1);
   border-radius: 10px;
 }
-.ms-stat__num[data-v-3b13988e] {
+.ms-stat__num[data-v-69a1ef84] {
   font-size: 1.15rem;
   font-weight: 700;
 }
-.ms-stat__label[data-v-3b13988e] {
+.ms-stat__label[data-v-69a1ef84] {
   font-size: 0.75rem;
   color: rgba(var(--v-theme-on-surface), 0.55);
 }
-.ms-table[data-v-3b13988e] {
+.ms-table[data-v-69a1ef84] {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.82rem;
 }
-.ms-table th[data-v-3b13988e],
-.ms-table td[data-v-3b13988e] {
+.ms-table th[data-v-69a1ef84],
+.ms-table td[data-v-69a1ef84] {
   padding: 7px 8px;
   border-bottom: 1px solid rgba(var(--v-theme-on-surface), 0.1);
   text-align: left;
 }
-.ms-table th[data-v-3b13988e] {
+.ms-table th[data-v-69a1ef84] {
   font-weight: 700;
   color: rgba(var(--v-theme-on-surface), 0.6);
 }
-.ms-table .num[data-v-3b13988e] {
+.ms-table .num[data-v-69a1ef84] {
   text-align: right;
 }
-.ms-table__note[data-v-3b13988e] {
+.ms-table__note[data-v-69a1ef84] {
   margin-left: 6px;
   font-size: 0.75rem;
   color: rgba(var(--v-theme-on-surface), 0.55);
 }
-.ms-foot[data-v-3b13988e] {
+.ms-foot[data-v-69a1ef84] {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
   border-top: 1px solid rgba(var(--v-theme-on-surface), 0.1);
   flex-wrap: wrap;
+}
+.ms-platforms[data-v-69a1ef84] {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+.ms-platform[data-v-69a1ef84] {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.1);
+  border-radius: 10px;
+}
+.ms-platform--ok[data-v-69a1ef84] {
+  border-color: rgba(var(--v-theme-success), 0.4);
+}
+.ms-platform--off[data-v-69a1ef84] {
+  opacity: 0.7;
+}
+.ms-platform__name[data-v-69a1ef84] {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.ms-platform__state[data-v-69a1ef84] {
+  font-size: 0.74rem;
+  color: rgba(var(--v-theme-on-surface), 0.55);
+}
+.ms-platform--ok .ms-platform__state[data-v-69a1ef84] {
+  color: rgb(var(--v-theme-success));
 }

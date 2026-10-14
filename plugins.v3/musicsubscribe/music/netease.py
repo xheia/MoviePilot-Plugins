@@ -424,6 +424,9 @@ class NeteaseClient:
             artists=[name for name in singers if name],
             album=album or "",
             duration=to_seconds(pick_first(raw, "dt", "duration")),
+            platform="netease",
+            source_id=str(raw.get("id") or ""),
+            album_id=str((album_raw or {}).get("id") or ""),
         )
 
 

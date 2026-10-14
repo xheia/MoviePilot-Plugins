@@ -21,6 +21,7 @@
         <v-tabs v-model="tab" color="primary" class="mb-4">
           <v-tab value="config">配置页 Config</v-tab>
           <v-tab value="page">数据页 Page</v-tab>
+          <v-tab value="search">搜索页 Search</v-tab>
         </v-tabs>
 
         <v-window v-model="tab">
@@ -32,6 +33,11 @@
           <v-window-item value="page">
             <div class="preview-frame" :style="frameStyle">
               <page-component :api="api" :show_switch="true" @switch="tab = 'config'" @close="onClose" />
+            </div>
+          </v-window-item>
+          <v-window-item value="search">
+            <div class="preview-frame" :style="frameStyle">
+              <search-component :api="api" :show_switch="true" @switch="tab = 'config'" @close="onClose" />
             </div>
           </v-window-item>
         </v-window>
@@ -47,6 +53,7 @@ import { computed, reactive, ref } from 'vue'
 import { useTheme } from 'vuetify'
 import PageComponent from './components/Page.vue'
 import ConfigComponent from './components/Config.vue'
+import SearchComponent from './components/Search.vue'
 import { createMockApi } from './dev/mockApi'
 
 const theme = useTheme()
@@ -70,7 +77,6 @@ const mockConfig = {
   wy_daily_list: false,
   wy_daily_song: false,
   qqmusic_paths: '8888888888:QQ 精选',
-  qishui_paths: '',
 }
 
 function toggleTheme() {

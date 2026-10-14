@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional
 
+from .sourcelink import source_links as _build_source_links
+
 #: 插件数据键名
 PENDING_KEY = "pending_tracks"
 #: 清单条数上限，超出后丢弃最早的条目
@@ -24,6 +26,16 @@ HISTORY_LIMIT = 1000
 def pending_key(title: str, artist: str = "") -> str:
     """去重键：同一首歌被多个歌单判定为缺失时只保留一条。"""
     return f"{artist or ''} {title or ''}".strip().lower()
+
+
+def _source_links(item: Dict[str, Any]) -> Dict[str, str]:
+    """从一条缺失曲目记录里取出平台身份，算好来源链接（歌曲 / 专辑 / 歌手）。"""
+    return _build_source_links(
+        item.get("platform") or "",
+        item.get("source_id") or "",
+        item.get("album_id") or "",
+        item.get("artist") or "",
+    )
 
 
 class PendingStore:
@@ -100,6 +112,12 @@ class PendingStore:
                 "source": item.get("source") or "",
                 "server": item.get("server") or "",
                 "playlist": item.get("playlist") or "",
+                # 来源平台身份（netease / qq / spotify …），用于构造「来源链接」
+                "platform": item.get("platform") or "",
+                "source_id": str(item.get("source_id") or ""),
+                "album_id": str(item.get("album_id") or ""),
+                # 来源链接（歌曲 / 专辑 / 歌手）随记录一起算好，UI 直接展示，无需再查
+                "links": _source_links(item),
                 "hits": hits,
                 "first_time": now,
                 "last_time": now,

@@ -1,6 +1,6 @@
 """曲目模型与文本归一化。
 
-三个数据源（网易云 / QQ音乐 / 汽水音乐）与两个媒体服务器（Plex / Emby）
+统一曲目模型：各数据源（网易云 / QQ音乐 / …）与两个媒体服务器（Plex / Emby）
 共用这一份最小模型：歌名、歌手列表、专辑名、时长（秒）。时长未知时记 0，
 界面上按空字符串展示。
 """
@@ -102,6 +102,12 @@ class Track:
     album: str = ""
     #: 时长（秒），未知为 0
     duration: int = 0
+    #: 来源平台标识（``netease`` / ``qq`` / ``spotify`` / …），用于构造「来源链接」
+    platform: str = ""
+    #: 歌曲在来源平台上的 ID（网易云数字 ID / QQ 的 mid / …）
+    source_id: str = ""
+    #: 专辑在来源平台上的 ID（与 ``source_id`` 同体系；专辑订阅 / 链接需要）
+    album_id: str = ""
 
     @property
     def artist(self) -> str:
@@ -130,4 +136,7 @@ class Track:
             "album": self.album,
             "duration": self.duration,
             "duration_text": self.duration_text,
+            "platform": self.platform,
+            "source_id": self.source_id,
+            "album_id": self.album_id,
         }

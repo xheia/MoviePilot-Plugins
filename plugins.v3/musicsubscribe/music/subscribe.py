@@ -33,8 +33,6 @@ TARGET_ALBUM = "album"
 
 #: 订阅目标 → 宿主音乐实体类型
 MUSIC_TYPES: Dict[str, str] = {TARGET_SONG: "recording", TARGET_ALBUM: "album"}
-#: 歌手实体类型（只用来查歌手详情页链接，不参与订阅）
-MUSIC_ENTITY_ARTIST = "artist"
 
 
 def _compact(text: Any) -> str:
@@ -72,10 +70,6 @@ class MusicSubscriber:
         #: 键为 ``(music_type, title, artist, album)``，值为 ``(来源, 媒体ID, 曲目总数)`` 或 None。
         #: 缓存很有必要：一次识别至少是一次网络往返，批量订阅时同一首歌会被反复问到。
         self._cache: Dict[Tuple[str, str, str, str], Optional[Tuple[Any, str, int]]] = {}
-        #: 识别结果的详情缓存（链接要用），键同 ``_cache``
-        self._info_cache: Dict[Tuple[str, str, str, str], Any] = {}
-        #: 链接缓存：``album:来源:ID`` / ``artist:歌手名`` -> 详情页链接
-        self._link_cache: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # 对外入口
@@ -89,15 +83,13 @@ class MusicSubscriber:
     def reset(self) -> None:
         """换一轮（或换一次用户操作）时清空识别缓存。"""
         self._cache = {}
-        self._info_cache = {}
-        self._link_cache = {}
 
     def subscribe(self, track: Track, target: str = TARGET_SONG) -> Dict[str, Any]:
         """订阅一首歌或它所在的专辑。
 
         :return: ``{ok, id, type, keyword, message, source, media_id, links}``；
             ``ok=False`` 时 ``message`` 说明原因（未搜到 / 未识别到身份 /
-            专辑曲目数未知 / 订阅链拒绝等）；``links`` 为官方详情页链接
+            专辑曲目数未知 / 订阅链拒绝等）；``links`` 为来源链接
             （``song`` / ``album`` / ``artist`` 三个键，取不到时为空串）。
         """
         target = TARGET_ALBUM if str(target).lower() == TARGET_ALBUM else TARGET_SONG
@@ -124,7 +116,7 @@ class MusicSubscriber:
             logger.info(f"专辑[{display}]曲目总数未知，放弃专辑订阅")
             return self._fail("专辑曲目总数未知，无法订阅专辑", display=display)
 
-        links = self._links(music_type, track, media_source, media_id)
+        links = self.source_links(track)
         try:
             subscribe_id, message = SubscribeChain().add(
                 title=display,
@@ -183,14 +175,13 @@ class MusicSubscriber:
             return self._cache[key]
         while len(self._cache) >= self.CACHE_LIMIT:
             self._cache.pop(next(iter(self._cache)), None)
-        value, info = self._resolve_uncached(music_type, track)
+        value = self._resolve_uncached(music_type, track)
         self._cache[key] = value
-        self._info_cache[key] = info
         return value
 
     def _resolve_uncached(self, music_type: str, track: Track
-                          ) -> Tuple[Optional[Tuple[Any, str, int]], Any]:
-        """按候选顺序找到第一个能对上的身份，同时带回命中时的识别结果。"""
+                          ) -> Optional[Tuple[Any, str, int]]:
+        """按候选顺序找到第一个能对上的身份。"""
         for candidate in self._candidates(music_type, track):
             source = getattr(candidate, "media_source", None)
             media_id = getattr(candidate, "media_id", None)
@@ -351,98 +342,23 @@ class MusicSubscriber:
             return 0
 
     # ------------------------------------------------------------------
-    # 官方详情页链接（歌曲 / 专辑 / 歌手）
+    # 来源链接（歌曲 / 专辑 / 歌手）—— 指向曲目最初所在的音乐平台
     # ------------------------------------------------------------------
 
     def links(self, track: Track) -> Dict[str, str]:
-        """只查官方详情页链接，不订阅（供清单按需查看）。
+        """查询曲目的「来源链接」（指向网易云 / QQ音乐等来源平台上的那首歌）。
+
+        链接完全由曲目的「平台 + 平台内 ID」拼出，不需要宿主识别，
+        因此即时可得、且一定回到最初的那家平台，而不是宿主元数据源（如 MusicBrainz）。
 
         :return: ``{"song": ..., "album": ..., "artist": ...}``，取不到时为空串。
         """
-        music_type = MUSIC_TYPES[TARGET_SONG]
-        identity = self._resolve(music_type, track)
-        empty = {"song": "", "album": "", "artist": ""}
-        if not identity:
-            return empty
-        source, media_id, _ = identity
-        return self._links(music_type, track, source, media_id)
+        return self.source_links(track)
 
-    def _links(self, music_type: str, track: Track, source: Any,
-               media_id: str) -> Dict[str, str]:
-        """从识别结果里取三个官方详情页链接。"""
-        info = self._info_cache.get(
-            (music_type, track.title, track.artist, track.album or ""))
-        song_url = ""
-        album_url = ""
-        if info is not None:
-            if music_type == MUSIC_TYPES[TARGET_ALBUM]:
-                album_url = str(getattr(info, "detail_link", "") or "")
-                song_url = self._track_link(info, track.title)
-            else:
-                song_url = str(getattr(info, "detail_link", "") or "")
-                album_url = self._album_link(source, str(getattr(info, "album_id", "") or ""))
-        return {"song": song_url, "album": album_url,
-                "artist": self._artist_link(track.artist)}
-
-    @staticmethod
-    def _track_link(album_info: Any, title: str) -> str:
-        """专辑订阅时，从专辑曲目里找同名歌曲的详情链接。"""
-        if not title:
-            return ""
-        for item in getattr(album_info, "tracks", None) or []:
-            name = str(getattr(item, "title", "") or "")
-            if _compact(name) and _same_or_contains(_compact(title), _compact(name)):
-                return str(getattr(item, "detail_link", "") or "")
-        return ""
-
-    def _album_link(self, source: Any, album_id: str) -> str:
-        """按专辑 ID 取专辑详情页链接（结果按 来源+ID 缓存）。"""
-        if not album_id or str(album_id) == "0":
-            return ""
-        cache_key = f"album:{source}:{album_id}"
-        cached = self._link_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        link = ""
-        chain = self._media_chain()
-        getter = getattr(chain, "get_music_album", None) if chain else None
-        if callable(getter):
-            try:
-                album = getter(media_source=source, media_id=album_id)
-                link = str(getattr(album, "detail_link", "") or "")
-            except Exception as error:  # noqa: BLE001 - 取不到链接不影响订阅
-                logger.info(f"查询专辑链接[{source}:{album_id}]失败：{error}")
-        self._link_cache[cache_key] = link
-        return link
-
-    def _artist_link(self, artist: str) -> str:
-        """按歌手名搜一次艺术家实体，取其官方详情页链接。"""
-        artist = (artist or "").strip()
-        if not artist:
-            return ""
-        cached = self._link_cache.get(f"artist:{artist}")
-        if cached is not None:
-            return cached
-        link = ""
-        chain = self._media_chain()
-        searcher = getattr(chain, "search_music", None) if chain else None
-        if callable(searcher):
-            try:
-                found = searcher(query=artist, limit=5, media_source=None,
-                                 music_types=(MUSIC_ENTITY_ARTIST,))
-            except Exception as error:  # noqa: BLE001
-                logger.info(f"搜索歌手[{artist}]失败：{error}")
-                found = []
-            wanted = _compact(artist)
-            for item in found or []:
-                name = str(getattr(item, "title", "") or getattr(item, "name", "") or "")
-                if not name:
-                    continue
-                if _same_or_contains(wanted, _compact(name)):
-                    link = str(getattr(item, "detail_link", "") or "")
-                    break
-        self._link_cache[f"artist:{artist}"] = link
-        return link
+    def source_links(self, track: Track) -> Dict[str, str]:
+        """从曲目的平台身份构造来源链接（见 :mod:`music.sourcelink`）。"""
+        from .sourcelink import source_links as build_links
+        return build_links(track.platform, track.source_id, track.album_id, track.artist)
 
     @staticmethod
     def _match(music_type: str, track: Track, info: Any) -> bool:

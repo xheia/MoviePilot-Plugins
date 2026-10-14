@@ -12,7 +12,18 @@ const MOCK_CONFIG = {
   wy_daily_list: false,
   wy_daily_song: false,
   qqmusic_paths: '8888888888:QQ 精选',
-  qishui_paths: '',
+  search_enabled: true,
+  download_enabled: true,
+  download_path: '/media/music',
+  download_format: 'flac',
+  download_client: 'auto',
+  spotify_client_id: '',
+  spotify_client_secret: '',
+  other_paths: 'spotify|https://open.spotify.com/playlist/demo|示例歌单\nkugou|12345|华语精选',
+  bitmagnet_enabled: true,
+  bitmagnet_url: 'http://192.168.1.100:3333',
+  bitmagnet_api_key: '',
+  bitmagnet_limit: 20,
 }
 
 const PENDING = [
@@ -46,12 +57,50 @@ export function createMockApi() {
     async get(path) {
       await delay(120)
       if (path.startsWith('/status')) {
-        return { code: 0, version: '2.2.0', enabled: MOCK_CONFIG.enabled, username: '开发预览', logged_in: true, ncm_api_url: MOCK_CONFIG.ncm_api_url, media_servers: [{ title: 'Plex', value: 'Plex' }, { title: 'Emby', value: 'Emby' }], selected_servers: MOCK_CONFIG.media_server, config: { ...MOCK_CONFIG }, stats: { start_time: '2026-09-20 04:00:12', duration: 42.6, missing: 2, servers: ['Plex'], playlists: [{ server: 'Plex', source: '网易云', name: '我的收藏', total: 30, added: 28, missing: 2, status: 'ok', message: '' }] }, pending: summary(), history: historySummary() }
+        return { code: 0, version: '2.3.0', enabled: MOCK_CONFIG.enabled, username: '开发预览', logged_in: true, ncm_api_url: MOCK_CONFIG.ncm_api_url, media_servers: [{ title: 'Plex', value: 'Plex' }, { title: 'Emby', value: 'Emby' }], selected_servers: MOCK_CONFIG.media_server, config: { ...MOCK_CONFIG }, stats: { start_time: '2026-09-20 04:00:12', duration: 42.6, missing: 2, servers: ['Plex'], playlists: [{ server: 'Plex', source: '网易云', name: '我的收藏', total: 30, added: 28, missing: 2, status: 'ok', message: '' }] }, pending: summary(), history: historySummary(), bitmagnet: { enabled: MOCK_CONFIG.bitmagnet_enabled, url: MOCK_CONFIG.bitmagnet_url, configured: !!MOCK_CONFIG.bitmagnet_url, limit: MOCK_CONFIG.bitmagnet_limit } }
       }
       if (path.startsWith('/probe')) return { code: 0, message: 'ncm-api 连接正常（版本 3.9.2）', version: '3.9.2' }
       if (path.startsWith('/qrcode/status')) return { code: 0, status: 801, message: '等待扫码', logged_in: false, username: '' }
       if (path.startsWith('/history')) {
         return { code: 0, items: HISTORY, summary: historySummary() }
+      }
+      if (path.startsWith('/platforms')) {
+        return {
+          code: 0,
+          platforms: [
+            { name: 'netease', label: '网易云', available: true, reason: '' },
+            { name: 'qq', label: 'QQ音乐', available: true, reason: '' },
+            { name: 'spotify', label: 'Spotify', available: false, reason: '未配置 Spotify 的 client_id / client_secret' },
+            { name: 'kugou', label: '酷狗', available: true, reason: '' },
+            { name: 'kuwo', label: '酷我', available: true, reason: '' },
+            { name: 'migu', label: '咪咕', available: true, reason: '' },
+          ],
+          search_platforms: ['netease', 'qq', 'spotify', 'kugou', 'kuwo', 'migu'],
+          search_enabled: true,
+          download_enabled: true,
+        }
+      }
+      if (path.startsWith('/search')) {
+        const kw = decodeURIComponent((path.split('keyword=')[1] || '').split('&')[0] || '')
+        const q = kw || '示例歌'
+        const results = [
+          { platform: 'netease', source_id: 'n1', album_id: 'na1', title: q, artist: '周杰伦', album: '十一月的萧邦', duration_text: '04:20', links: { song: 'https://music.163.com/#/song?id=n1', album: '', artist: '' } },
+          { platform: 'qq', source_id: 'q1', album_id: 'qa1', title: q, artist: '陈奕迅', album: 'U87', duration_text: '04:00', links: { song: 'https://y.qq.com/n/ryqq/songDetail/q1', album: '', artist: '' } },
+          { platform: 'kugou', source_id: 'k1', album_id: 'ka1', title: q, artist: '薛之谦', album: '绅士', duration_text: '03:50', links: { song: '', album: '', artist: 'https://www.kugou.com/search?keyword=薛之谦' } },
+        ]
+        return { code: 0, keyword: q, count: results.length, results, platforms: ['netease', 'qq', 'kugou'], errors: {} }
+      }
+      if (path.startsWith('/smartlist')) {
+        const getp = k => { const m = (path.split('?')[1] || '').match(new RegExp(k + '=([^&]*)')); return m ? decodeURIComponent(m[1]) : '' }
+        const seedTitle = getp('title') || '晴天'
+        const seedArtist = getp('artist') || ''
+        const base = [
+          { platform: 'netease', source_id: 'a1', album_id: 'al1', title: '七里香', artist: '周杰伦', album: '七里香', duration_text: '04:10', score: 0.55, platform_label: '网易云', links: { song: 'https://music.163.com/#/song?id=a1', album: '', artist: '' } },
+          { platform: 'netease', source_id: 'a2', album_id: 'al2', title: '稻香', artist: '周杰伦', album: '魔杰座', duration_text: '03:43', score: 0.53, platform_label: '网易云', links: { song: 'https://music.163.com/#/song?id=a2', album: '', artist: '' } },
+          { platform: 'qq', source_id: 'b1', album_id: 'bl1', title: '晴天', artist: '林俊杰', album: '第二天堂', duration_text: '04:29', score: 0.23, platform_label: 'QQ音乐', links: { song: 'https://y.qq.com/n/ryqq/songDetail/b1', album: '', artist: '' } },
+          { platform: 'kugou', source_id: 'c1', album_id: 'cl1', title: '演员', artist: '薛之谦', album: '绅士', duration_text: '04:00', score: 0.0, platform_label: '酷狗', links: { song: '', album: '', artist: 'https://www.kugou.com/search?keyword=薛之谦' } },
+        ]
+        return { code: 0, seed: { title: seedTitle, artist: seedArtist, album: '', platform: '' }, pool_size: base.length + 5, count: base.length, playlist: base }
       }
       if (path.startsWith('/pending')) {
         return { code: 0, items: PENDING, summary: summary(), stats: {}, history: historySummary(), targets: [{ value: 'song', label: '歌曲' }, { value: 'album', label: '专辑' }] }
@@ -75,6 +124,25 @@ export function createMockApi() {
         return { code: 0, seq: (body && body.seq) || 0, title: '演示', links: { song: 'https://musicbrainz.org/recording/mb-001', album: '', artist: 'https://musicbrainz.org/artist/mb-artist-1' } }
       }
       if (path.startsWith('/history/clear')) return { code: 0, message: '已清空订阅历史 0 条', removed: 0, summary: historySummary() }
+      if (path.startsWith('/download')) {
+        const p = (body && body.platform) || ''
+        if (p === 'netease') {
+          return { code: 0, ok: true, kind: 'direct', message: '已保存到 /media/music（演示：经 ncm-api 取直链）', path: '/media/music' }
+        }
+        if (MOCK_CONFIG.bitmagnet_enabled && MOCK_CONFIG.bitmagnet_url) {
+          return {
+            code: 0, ok: true, kind: 'torrent', source: 'bitmagnet', title: '周杰伦 - 叶惠美 [FLAC]',
+            seeders: 12, leechers: 3,
+            message: `${p || '该平台'} 未开放音频直链；已改用 bitmagnet 检索到种子「周杰伦 - 叶惠美 [FLAC]」（412.7MB，做种 12）`,
+          }
+        }
+        return { code: 1, ok: false, kind: 'none', message: `${p || '该平台'} 未开放音频直链（或该内容为付费 / 试听片段），插件不做解密与绕过` }
+      }
+      if (path.startsWith('/bitmagnet/test')) {
+        const url = (body && body.url) || MOCK_CONFIG.bitmagnet_url || ''
+        if (!url) return { code: 1, message: '未配置 bitmagnet 服务地址', endpoint: '' }
+        return { code: 0, ok: true, version: '0.10.1', endpoint: `${url.replace(/\/+$/, '')}/graphql`, message: 'bitmagnet 已连通（版本 0.10.1）' }
+      }
       return { code: 0, message: 'mock: 已处理 ' + path }
     },
   }

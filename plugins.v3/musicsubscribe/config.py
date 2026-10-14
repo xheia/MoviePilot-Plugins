@@ -22,6 +22,10 @@ DEFAULT_NCM_API_URL = "http://192.168.1.100:1630"
 #: 订阅人默认值（写到宿主订阅记录的 username 上，便于在订阅列表里区分来源）
 DEFAULT_SUBSCRIBE_USER = "歌单订阅"
 
+#: bitmagnet 单次检索返回的种子条数上限（超过 100 对自建实例压力偏大）
+DEFAULT_BITMAGNET_LIMIT = 20
+MAX_BITMAGNET_LIMIT = 100
+
 
 #: 默认配置
 DEFAULTS: Dict[str, Any] = {
@@ -37,18 +41,41 @@ DEFAULTS: Dict[str, Any] = {
     "wymusic_paths": "",
     "wy_daily_list": False,
     "wy_daily_song": False,
-    # QQ 音乐 / 汽水音乐
+    # QQ 音乐
     "qqmusic_paths": "",
-    "qishui_paths": "",
+    # 搜索与下载
+    "search_enabled": False,
+    "download_enabled": False,
+    "download_path": "",
+    "download_format": "flac",
+    "download_client": "auto",
+    # Spotify 凭据（Web API client credentials）
+    "spotify_client_id": "",
+    "spotify_client_secret": "",
+    # 其它平台歌单（酷狗 / 酷我 / 咪咕 / Spotify …）：每行 platform|标识符|播放列表名[:用户]
+    "other_paths": "",
+    # bitmagnet（自建 BT 索引器，GraphQL 接口）：用于无直链时检索种子下载
+    "bitmagnet_enabled": False,
+    "bitmagnet_url": "",
+    "bitmagnet_api_key": "",
+    "bitmagnet_limit": DEFAULT_BITMAGNET_LIMIT,
 }
 
 #: 布尔配置项
-_BOOL_KEYS = ("enabled", "exact_match", "wy_daily_list", "wy_daily_song")
+_BOOL_KEYS = ("enabled", "exact_match", "wy_daily_list", "wy_daily_song",
+              "search_enabled", "download_enabled", "bitmagnet_enabled")
 #: 字符串配置项
 _STR_KEYS = (
-    "cron", "ncm_api_url", "wymusic_paths", "qqmusic_paths", "qishui_paths",
-    "subscribe_user",
+    "cron", "ncm_api_url", "wymusic_paths", "qqmusic_paths",
+    "subscribe_user", "download_path", "download_format", "download_client",
+    "spotify_client_id", "spotify_client_secret", "other_paths",
+    "bitmagnet_url", "bitmagnet_api_key",
 )
+
+#: 允许的下载格式（默认 flac）
+_DOWNLOAD_FORMATS = ("flac", "mp3", "m4a", "wav", "ogg")
+#: 允许的下载客户端（auto 表示交给宿主按已配置客户端选择）
+_DOWNLOAD_CLIENTS = ("auto", "qbittorrent", "transmission")
 
 
 def defaults() -> Dict[str, Any]:
@@ -72,6 +99,20 @@ def normalize(config: Dict[str, Any] = None) -> Dict[str, Any]:
             data[key] = str(value).strip()
     # ncm-api 地址统一去掉尾部斜杠，避免出现 "http://host:1630//xxx" 这种双斜杠请求
     data["ncm_api_url"] = (data["ncm_api_url"] or "").rstrip("/")
+    # 下载格式收敛到白名单，非法值回退到 flac
+    if data.get("download_format") not in _DOWNLOAD_FORMATS:
+        data["download_format"] = "flac"
+    # 下载客户端收敛到白名单，非法值回退到 auto
+    if data.get("download_client") not in _DOWNLOAD_CLIENTS:
+        data["download_client"] = "auto"
+    # bitmagnet 地址去掉尾部斜杠（GraphQL 端点固定为 /graphql）
+    data["bitmagnet_url"] = (data["bitmagnet_url"] or "").rstrip("/")
+    # bitmagnet 结果条数收敛到 1..100 的整数（缺省 / 非法值回退到默认）
+    try:
+        limit = int(raw.get("bitmagnet_limit", DEFAULT_BITMAGNET_LIMIT))
+    except (TypeError, ValueError):
+        limit = DEFAULT_BITMAGNET_LIMIT
+    data["bitmagnet_limit"] = max(1, min(MAX_BITMAGNET_LIMIT, limit))
     servers = raw.get("media_server")
     if isinstance(servers, str):
         servers = [item.strip() for item in servers.split(",") if item.strip()]
@@ -122,3 +163,32 @@ def parse_playlist_line(line: str) -> Tuple[str, str, List[str]]:
     if not identifier.isdigit() or not playlist:
         return "", "", []
     return identifier, playlist, users
+
+
+def parse_platform_line(line: str) -> Tuple[str, str, str, List[str]]:
+    """解析「其它平台」歌单配置：``平台|标识符|播放列表名[:emby用户名,...]``。
+
+    与网易云 / QQ 的 ``歌单ID:名称`` 不同，这里用 ``|`` 作分隔符，因为标识符可能是
+    一条 URL（如 Spotify 歌单链接 ``https://open.spotify.com/playlist/xxx``），冒号会
+    和 ``https://`` 冲突。
+
+    :return: ``(平台, 标识符, 播放列表名, 用户列表)``；格式不规范时平台为空串。
+    """
+    text = str(line or "").strip()
+    if not text or text.startswith("#"):
+        return "", "", "", []
+    # 至少要有「平台|标识符|名称」三段
+    parts = text.split("|")
+    if len(parts) < 3:
+        return "", "", "", []
+    platform = parts[0].strip().lower()
+    identifier = parts[1].strip()
+    rest = parts[2].strip()
+    if not platform or not identifier or not rest:
+        return "", "", "", []
+    head, _, tail = rest.partition(":")
+    playlist = head.strip()
+    users = [name.strip() for name in tail.split(",") if name.strip()]
+    if not playlist:
+        return "", "", "", []
+    return platform, identifier, playlist, users

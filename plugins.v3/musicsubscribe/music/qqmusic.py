@@ -145,4 +145,8 @@ class QQMusicClient:
             album=album or "",
             # interval 单位是秒
             duration=to_seconds(raw.get("interval")),
+            platform="qq",
+            # mid 是 QQ 音乐跨端统一的资源标识，详情页与搜索都用它
+            source_id=str(raw.get("mid") or raw.get("songid") or ""),
+            album_id=str((album_raw or {}).get("mid") or ""),
         )

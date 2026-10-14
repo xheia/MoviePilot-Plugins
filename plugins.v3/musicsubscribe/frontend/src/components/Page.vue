@@ -87,7 +87,7 @@
               <th class="col-dur">时长</th>
               <th>歌手</th>
               <th>专辑名称</th>
-              <th class="col-link">官方链接</th>
+              <th class="col-link">来源链接</th>
             </tr>
           </thead>
           <tbody>
@@ -114,16 +114,10 @@
               <td>{{ row.artist || '-' }}</td>
               <td>{{ row.album || '-' }}</td>
               <td class="col-link">
-                <button v-if="!linkCache[row.seq]" type="button" class="ms-linkbtn"
-                  :disabled="linking === row.seq" @click="loadLink(row)">
-                  {{ linking === row.seq ? '查询中…' : '查询链接' }}
-                </button>
-                <template v-else>
-                  <span v-for="l in linkEntries(linkCache[row.seq])" :key="`${row.seq}-${l.key}`">
-                    <a v-if="l.url" :href="l.url" target="_blank" rel="noopener">{{ l.label }}</a>
-                    <span v-else class="ms-link-off">{{ l.label }}</span>
-                  </span>
-                </template>
+                <span v-for="l in linkEntries(row.links)" :key="`${row.seq}-${l.key}`">
+                  <a v-if="l.url" :href="l.url" target="_blank" rel="noopener">{{ l.label }}</a>
+                  <span v-else class="ms-link-off">{{ l.label }}</span>
+                </span>
               </td>
             </tr>
           </tbody>
@@ -141,7 +135,7 @@
               <th class="col-pick">粒度</th>
               <th>订阅人</th>
               <th class="col-time">订阅时间</th>
-              <th class="col-link">官方链接</th>
+              <th class="col-link">来源链接</th>
             </tr>
           </thead>
           <tbody>
@@ -236,7 +230,6 @@ const loading = ref(false)
 const subscribing = ref(false)
 const removing = ref(false)
 const clearingHistory = ref(false)
-const linking = ref(null)
 const error = ref('')
 const result = ref('')
 const resultLevel = ref('success')
@@ -252,8 +245,6 @@ const stats = ref({})
 const targets = ref([{ value: 'song', label: '歌曲' }, { value: 'album', label: '专辑' }])
 const targetOptions = [{ value: 'song', label: '歌曲' }, { value: 'album', label: '专辑' }]
 const targetFilter = ref(null)
-// seq -> { song, album, artist }（按需查询，避免同步时给每首歌都做一次识别）
-const linkCache = reactive({})
 
 const scope = ref('all')
 const keyword = ref('')
@@ -345,7 +336,6 @@ async function load() {
     if (Array.isArray(res?.targets) && res.targets.length) targets.value = res.targets
     const alive = new Set(items.value.map(i => Number(i.seq)))
     Object.keys(picks).forEach(seq => { if (!alive.has(Number(seq))) delete picks[seq] })
-    Object.keys(linkCache).forEach(seq => { if (!alive.has(Number(seq))) delete linkCache[seq] })
     if (page.value > pageCount.value) page.value = pageCount.value
   } catch (e) {
     error.value = '加载缺失清单失败：' + (e?.message || e)
@@ -384,26 +374,6 @@ function switchView(next) {
 function switchScope(next) {
   view.value = 'pending'
   scope.value = next
-}
-
-async function loadLink(row) {
-  const seq = Number(row.seq)
-  linking.value = seq
-  result.value = ''
-  try {
-    const res = await call('post', `${PLUGIN}/pending/link`, { seq })
-    if (res?.code === 0) {
-      linkCache[seq] = res.links || {}
-    } else {
-      resultLevel.value = 'warning'
-      result.value = res?.message || '没查到官方链接'
-    }
-  } catch (e) {
-    resultLevel.value = 'error'
-    result.value = '查询链接失败：' + (e?.message || e)
-  } finally {
-    linking.value = null
-  }
 }
 
 async function clearHistory() {
@@ -794,7 +764,7 @@ button.ms-stat {
   color: rgba(var(--v-theme-on-surface), 0.6);
 }
 
-/* 官方详情页链接：歌曲 / 专辑 / 歌手 */
+/* 来源链接：歌曲 / 专辑 / 歌手（指向曲目最初所在的音乐平台） */
 .col-link {
   width: 150px;
   white-space: nowrap;
