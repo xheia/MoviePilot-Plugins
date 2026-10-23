@@ -9,11 +9,18 @@
 
 网易云的登录与取数统一交给本地部署的 ncm-api 容器（``moefurina/ncm-api``），
 插件不内置加密实现，也不做无人值守的自动订阅。
+
+**性能约定（v2.4.0 起）**：一轮同步先把全部歌单拉成快照再分发给各媒体服务器
+（跨服务器复用，单个歌单读取失败沿用上次快照）；按服务器建一份曲库索引，
+逐曲匹配不再请求媒体库；同步用非阻塞锁互斥；订阅走有界并行 + 失败退避，
+成功后即入宿主原生搜索队列；分段耗时与索引指标一起进数据页。
 """
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from threading import Event
+from threading import Event, Lock
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pytz
@@ -39,6 +46,7 @@ from .config import (
 from .music.bitmagnet import BitmagnetClient
 from .music.download import Downloader
 from .music.emby import EmbyMusic
+from .music.index import LibraryIndex
 from .music.netease import NeteaseClient, NeteaseError
 from .music.plex import PlexMusic
 from .music.platform import (
@@ -47,12 +55,20 @@ from .music.platform import (
 )
 from .music.smartlist import SmartListGenerator, build_seed
 from .music.qqmusic import QQMusicClient
-from .music.subscribe import TARGET_ALBUM, TARGET_SONG, MusicSubscriber
-from .music.track import Track, format_duration
+from .music.subscribe import (
+    MUSIC_TYPES, TARGET_ALBUM, TARGET_SONG, MusicSubscriber,
+)
+from .music.track import Track, compact_text, format_duration
 from .store import HistoryStore, PendingStore, pending_key
 
 #: 插件数据键名：最近一次同步统计
 SYNC_STATS_KEY = "sync_stats"
+#: 插件数据键名：歌单快照（一轮一次，跨媒体服务器复用）
+SNAPSHOT_KEY = "playlist_snapshot"
+#: 订阅失败后的重试冷却（秒）
+RETRY_COOLDOWN = 3600
+#: 订阅历史保留天数（过期且不在宿主订阅列表才清理）
+HISTORY_KEEP_DAYS = 90
 
 
 class PlaylistJob:
@@ -82,7 +98,7 @@ class MusicSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "music.png"
     # 插件版本
-    plugin_version = "2.3.1"
+    plugin_version = "2.4.0"
     # 插件作者
     plugin_author = "xheia"
     # 作者主页
@@ -102,6 +118,12 @@ class MusicSubscribe(_PluginBase):
     _exact_match = True
     #: 订阅人（写到宿主订阅记录的 username 上）
     _subscribe_user = DEFAULT_SUBSCRIBE_USER
+    #: 订阅并发数（1-8）：并行做搜索 / 识别 / 订阅的条数
+    _subscribe_workers = 2
+    #: 订阅成功后立即送入宿主原生搜索队列并后台唤醒
+    _immediate_search = True
+    #: 启用曲库索引（每轮每台媒体库 1 次全库请求，替代逐歌检索）
+    _library_index = True
     _ncm_api_url = DEFAULT_NCM_API_URL
     _wymusic_paths = ""
     _qqmusic_paths = ""
@@ -136,6 +158,10 @@ class MusicSubscribe(_PluginBase):
     media_list: List[Dict[str, str]] = []
     #: 本轮同步收集到的缺失曲目：键（歌手 歌名）-> 带来源的条目
     _round_missing: Dict[str, Dict[str, Any]] = {}
+    #: 同步互斥：类级非阻塞锁（等一轮同步要好几分钟，排队没有意义）
+    _sync_lock: Lock = Lock()
+    #: 是否有同步正在运行（供状态接口与数据页展示）
+    _syncing: bool = False
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -153,6 +179,9 @@ class MusicSubscribe(_PluginBase):
         self._media_server = list(cfg["media_server"])
         self._exact_match = cfg["exact_match"]
         self._subscribe_user = cfg["subscribe_user"] or DEFAULT_SUBSCRIBE_USER
+        self._subscribe_workers = cfg["subscribe_workers"]
+        self._immediate_search = cfg["immediate_search"]
+        self._library_index = cfg["library_index"]
         self._ncm_api_url = cfg["ncm_api_url"] or DEFAULT_NCM_API_URL
         self._wymusic_paths = cfg["wymusic_paths"]
         self._qqmusic_paths = cfg["qqmusic_paths"]
@@ -364,6 +393,7 @@ class MusicSubscribe(_PluginBase):
             "code": 0,
             "version": self.plugin_version,
             "enabled": self._enabled,
+            "running": self._syncing,
             "username": username or "",
             "logged_in": bool(username),
             "ncm_api_url": self._ncm_api_url,
@@ -443,11 +473,20 @@ class MusicSubscribe(_PluginBase):
         mode = (scope or "all").strip().lower()
         if mode == "failed":
             records = [item for item in records if (item.get("subscribe_message") or "")]
+        now = time.time()
+        for item in records:
+            # 失败冷却剩余秒数（0 表示可以再次订阅）
+            try:
+                retry_at = float(item.get("retry_at") or 0)
+            except (TypeError, ValueError):
+                retry_at = 0
+            item["retry_in"] = max(0, int(retry_at - now)) if retry_at > now else 0
         return {
             "code": 0,
             "items": records,
             "summary": self._store().summary(),
             "stats": self.get_data(SYNC_STATS_KEY) or {},
+            "running": self._syncing,
             "history": self._history_store().summary(),
             "targets": [{"value": TARGET_SONG, "label": "歌曲"},
                         {"value": TARGET_ALBUM, "label": "专辑"}],
@@ -458,6 +497,9 @@ class MusicSubscribe(_PluginBase):
 
         body: ``{"items": [{"seq": 1, "target": "song|album"}, ...]}``；
         同一序号只会按一种粒度订阅（歌曲与专辑二选一）。
+
+        流程：预查宿主订阅列表去重 → 失败冷却跳过 → 有界并行订阅（默认 2 路）
+        → 主线程统一落盘 → 订阅成功即入宿主原生搜索队列（可关）。
         """
         data = request if isinstance(request, dict) else {}
         items = data.get("items")
@@ -484,23 +526,23 @@ class MusicSubscribe(_PluginBase):
         subscriber = self._subscribes()
         subscriber.reset()
         now = self._now()
+        # 宿主订阅列表 / 完成历史里已有的（按订阅标题匹配），直接算已在订阅中
+        existing = self._host_subscription_keys()
+        todo: List[Tuple[Dict[str, Any], str]] = []
+        results: List[Dict[str, Any]] = []
+        history_items: List[Dict[str, Any]] = []
         done_seqs: List[int] = []
         updates: List[Dict[str, Any]] = []
-        history_items: List[Dict[str, Any]] = []
-        results: List[Dict[str, Any]] = []
-        succeeded = failed = 0
-        for record in records:
-            target = targets.get(int(record.get("seq") or 0), TARGET_SONG)
-            track = Track(
-                title=record.get("title") or "",
-                artists=[record["artist"]] if record.get("artist") else [],
-                album=record.get("album") or "",
-                duration=int(record.get("duration") or 0),
-            )
-            result = subscriber.subscribe(track, target)
+        succeeded = failed = skipped = 0
+        sub_ids: List[int] = []
+
+        def finish(record: Dict[str, Any], result: Dict[str, Any], target: str) -> None:
+            """汇总一条订阅结果（只在主线程调用，避免并发写账本）。"""
+            nonlocal succeeded, failed
+            seq = int(record.get("seq") or 0)
             if result.get("ok"):
-                # 订阅成功：移出清单并留一份订阅历史（订阅本身去宿主的订阅列表里管理）
-                done_seqs.append(int(record.get("seq") or 0))
+                done_seqs.append(seq)
+                sub_ids.append(int(result.get("id") or 0))
                 history_items.append({
                     "key": record.get("key") or "",
                     "title": record.get("title") or "",
@@ -519,9 +561,15 @@ class MusicSubscribe(_PluginBase):
                     "user": self._subscribe_user,
                     "time": now,
                 })
+                succeeded += 1
             else:
-                record["subscribe_message"] = result.get("message") or ""
-                updates.append(record)
+                # 失败留清单并进入冷却，到点前不再重复请求
+                failed += 1
+                updates.append({
+                    "key": record.get("key") or "",
+                    "subscribe_message": result.get("message") or "",
+                    "retry_at": round(time.time() + RETRY_COOLDOWN, 3),
+                })
             results.append({
                 "seq": record.get("seq"),
                 "title": record.get("title"),
@@ -529,25 +577,215 @@ class MusicSubscribe(_PluginBase):
                 "ok": bool(result.get("ok")),
                 "message": result.get("message") or "",
             })
-            if result.get("ok"):
-                succeeded += 1
+
+        for record in records:
+            seq = int(record.get("seq") or 0)
+            target = targets.get(seq, TARGET_SONG)
+            # 失败冷却未到期：整条跳过，不再打接口
+            retry_at = float(record.get("retry_at") or 0)
+            if retry_at > time.time():
+                remain = int((retry_at - time.time()) // 60) + 1
+                skipped += 1
+                results.append({
+                    "seq": seq, "title": record.get("title"), "target": target,
+                    "ok": False, "message": f"上次订阅失败，约 {remain} 分钟后自动重试"})
+                continue
+            display = self._display_of(record, target)
+            if compact_text(display) in existing:
+                # 宿主订阅列表里已有：不再重复订阅，直接出清单并入历史
+                logger.info(f"音乐订阅已存在（宿主订阅列表命中）：{display}")
+                finish(record, {"ok": True, "id": int(record.get("subscribe_id") or 0),
+                                "type": MUSIC_TYPES.get(target, ""),
+                                "keyword": display, "message": "宿主订阅列表里已存在"},
+                       target)
+                continue
+            todo.append((record, target))
+
+        if todo:
+            workers = max(1, int(self._subscribe_workers or 1))
+            if workers > 1 and len(todo) > 1:
+                # 有界并行：搜索 / 识别 / 订阅三步都是网络往返
+                with ThreadPoolExecutor(max_workers=workers,
+                                        thread_name_prefix="ms-subscribe") as executor:
+                    futures = {
+                        executor.submit(subscriber.subscribe, self._track_of(record), target,
+                                        self._source_label_of(record)):
+                            (record, target)
+                        for record, target in todo
+                    }
+                    for future in as_completed(futures):
+                        record, target = futures[future]
+                        try:
+                            result = future.result()
+                        except Exception as error:  # noqa: BLE001 - 单条异常不影响其它
+                            result = subscriber.fail(f"订阅失败：{error}")
+                        finish(record, result, target)
             else:
-                failed += 1
-        self._store().apply(updates)
-        if done_seqs:
-            self._store().remove(done_seqs)
+                for record, target in todo:
+                    try:
+                        result = subscriber.subscribe(self._track_of(record), target,
+                                                      self._source_label_of(record))
+                    except Exception as error:  # noqa: BLE001
+                        result = subscriber.fail(f"订阅失败：{error}")
+                    finish(record, result, target)
+
+        # 统一落盘：一次读-改-写完成「失败原因 + 移除成功行」，再写历史
+        self._store().flush(updates, done_seqs)
+        if history_items:
             self._history_store().add(history_items)
+
+        queued = 0
+        if self._immediate_search and sub_ids:
+            queued = self._queue_immediate_search(sub_ids)
+
         logger.info(
-            f"缺失曲目订阅完成：成功 {succeeded}，失败 {failed}"
+            f"缺失曲目订阅完成：成功 {succeeded}，失败 {failed}，跳过 {skipped}"
             f"（清单剩余 {self._store().summary()['total']} 条待处理，"
-            f"订阅历史累计 {self._history_store().summary()['total']} 条）")
+            f"订阅历史累计 {self._history_store().summary()['total']} 条"
+            + (f"，{queued} 个订阅已入宿主搜索队列" if queued else "") + "）")
         return {
             "code": 0,
-            "message": f"订阅完成：成功 {succeeded}，失败 {failed}",
+            "message": f"订阅完成：成功 {succeeded}，失败 {failed}"
+                       + (f"，{skipped} 条冷却中" if skipped else ""),
             "results": results,
             "summary": self._store().summary(),
             "history": self._history_store().summary(),
+            "search_queued": queued,
         }
+
+    # ------------------------------------------------------------------
+    # 订阅辅助：宿主订阅列表预查、立即搜索、清单字段
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _track_of(record: Dict[str, Any]) -> Track:
+        """清单记录还原成 :class:`Track`（歌手按「、」拆回多歌手）。"""
+        artists = [name for name in str(record.get("artist") or "").split("、") if name]
+        try:
+            duration = int(record.get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        return Track(
+            title=record.get("title") or "",
+            artists=artists,
+            album=record.get("album") or "",
+            duration=duration,
+            platform=(record.get("platform") or record.get("source") or "").strip().lower(),
+            source_id=str(record.get("source_id") or ""),
+            album_id=str(record.get("album_id") or ""),
+        )
+
+    @staticmethod
+    def _display_of(record: Dict[str, Any], target: str) -> str:
+        """与订阅时一致的显示名（用于和宿主订阅列表对标题）。"""
+        artist = str(record.get("artist") or "")
+        title = str(record.get("title") or "")
+        if target == TARGET_ALBUM:
+            return record.get("album") or title
+        return f"{artist} {title}".strip() if artist else title
+
+    def _source_label_of(self, record: Dict[str, Any]) -> str:
+        """写到宿主订阅记录 ``source`` 上的来源标签，便于在订阅列表里追溯。"""
+        server = str(record.get("server") or "").strip() or "-"
+        playlist = str(record.get("playlist") or "").strip() or "-"
+        return f"{self._subscribe_user}:{server}/{playlist}"
+
+    def _host_subscription_keys(self) -> set:
+        """宿主订阅列表 + 完成历史里已有订阅的标题（紧凑文本），用于去重预查。
+
+        覆盖「提交成功但本地账本还没写」的重启窗口；查询失败时返回空集合，
+        由订阅本身的 ``exist_ok`` 兜底。
+        """
+        try:
+            from app.schemas.types import MediaType
+            from app.sdk.queries import list_subscription_history, list_subscriptions
+        except Exception as error:  # noqa: BLE001 - 宿主过旧则跳过预查
+            logger.info(f"宿主不支持订阅查询，跳过预查：{error}")
+            return set()
+        keys: set = set()
+        filters = {"media_types": [MediaType.MUSIC]}
+        for query in (list_subscriptions, list_subscription_history):
+            try:
+                page = 1
+                while True:
+                    result = query(filters, {"page": page, "count": 100})
+                    for item in getattr(result, "items", None) or []:
+                        title = getattr(item, "title", None)
+                        if title:
+                            keys.add(compact_text(title))
+                    if not getattr(result, "has_next", False):
+                        break
+                    page += 1
+            except Exception as error:  # noqa: BLE001 - 单个查询失败不影响另一个
+                logger.info(f"预查宿主订阅列表失败：{error}")
+        return keys
+
+    def _queue_immediate_search(self, sub_ids: List[int]) -> int:
+        """把刚订阅成功的条目送入宿主的原生手动搜索队列并唤醒。
+
+        等同用户在 MP 里点「搜索」：走宿主原生持久队列（相同来源、优先级与去重
+        语义），不在请求线程里等待站点搜索，另起后台线程唤醒。
+        """
+        ids = tuple(dict.fromkeys(int(item) for item in sub_ids if int(item or 0) > 0))
+        if not ids:
+            return 0
+        try:
+            from app.chain.subscribe import SubscribeChain
+            chain = SubscribeChain()
+            queue = getattr(chain, "subscription_search_repository", None)
+            if queue is None:
+                logger.info("宿主没有订阅搜索队列，跳过立即搜索")
+                return 0
+            queue.enqueue(subscription_ids=ids, source="manual", priority=100)
+        except Exception as error:  # noqa: BLE001 - 入队失败不影响订阅结果
+            logger.info(f"订阅入队宿主搜索队列失败：{error}")
+            return 0
+
+        def _resume() -> None:
+            try:
+                chain.resume_search_queue(manual_sids=ids, limit=50)
+            except Exception as error:  # noqa: BLE001 - 后台唤醒失败只记日志
+                logger.info(f"唤醒宿主搜索队列失败：{error}")
+
+        threading.Thread(target=_resume, name="ms-search-queue", daemon=True).start()
+        logger.info(f"订阅已入宿主搜索队列：{len(ids)} 个（manual / 优先级 100）")
+        return len(ids)
+
+    def _active_subscription_ids(self) -> set:
+        """宿主订阅列表里仍在的订阅 ID（订阅历史治理时保护这些条目）。"""
+        try:
+            from app.schemas.types import MediaType
+            from app.sdk.queries import list_subscriptions
+        except Exception as error:  # noqa: BLE001 - 宿主过旧则不清理
+            logger.info(f"宿主不支持订阅查询，跳过历史清理：{error}")
+            return set()
+        ids: set = set()
+        try:
+            page = 1
+            while True:
+                result = list_subscriptions({"media_types": [MediaType.MUSIC]},
+                                            {"page": page, "count": 100})
+                for item in getattr(result, "items", None) or []:
+                    sub_id = getattr(item, "id", None)
+                    if sub_id:
+                        ids.add(int(sub_id))
+                if not getattr(result, "has_next", False):
+                    break
+                page += 1
+        except Exception as error:  # noqa: BLE001 - 查询失败时保守不清理
+            logger.info(f"查询宿主订阅 ID 失败，本轮不清理历史：{error}")
+            return set()
+        return ids
+
+    def _cleanup_history(self) -> None:
+        """订阅历史治理：过期且不在宿主订阅列表的才清理（与同步解耦，失败不影响本轮）。"""
+        try:
+            removed = self._history_store().prune(
+                keep_days=HISTORY_KEEP_DAYS, active_ids=self._active_subscription_ids())
+            if removed:
+                logger.info(f"订阅历史清理：移除过期历史 {removed} 条")
+        except Exception as error:  # noqa: BLE001
+            logger.info(f"订阅历史清理失败：{error}")
 
     def api_pending_remove(self, request: dict = None) -> Dict[str, Any]:
         """从清单移除勾选的记录。"""
@@ -817,10 +1055,38 @@ class MusicSubscribe(_PluginBase):
     # ------------------------------------------------------------------
 
     def _run_sync(self) -> None:
-        """同步入口：记账 + 兜底异常，保证数据页始终有本次结果可看。"""
+        """同步入口：互斥 + 记账 + 兜底异常，保证数据页始终有本次结果可看。
+
+        手动「立即运行一次」与定时任务可能同时触发，用非阻塞锁挡掉后来者
+        （等一轮同步要好几分钟，排队没有意义）。
+        """
+        if not self._sync_lock.acquire(blocking=False):
+            logger.info("已有同步任务正在运行，跳过本次触发")
+            stats = dict(self.get_data(SYNC_STATS_KEY) or {})
+            stats["skipped_at"] = self._now()
+            self.save_data(SYNC_STATS_KEY, stats)
+            return
         started = time.time()
+        self._syncing = True
+        try:
+            self._run_sync_inner(started)
+        finally:
+            self._syncing = False
+            self._sync_lock.release()
+
+    def _run_sync_inner(self, started: float) -> None:
+        """一轮同步的实际流程（互斥由 :meth:`_run_sync` 保证）。"""
         self._round_missing = {}
         self._subscribes().reset()
+        metrics: Dict[str, Any] = {
+            "fetch_seconds": 0.0,   # 拉全部歌单快照
+            "push_seconds": 0.0,    # 推送播放列表（含建曲库索引）
+            "missing_seconds": 0.0,  # 登记缺失曲目
+            "library_requests": 0,  # 媒体库请求次数（索引命中后趋近 0）
+            "index_entries": 0,     # 曲库索引条数
+            "used_index": False,    # 本轮是否走索引
+            "reused_snapshot": 0,   # 读取失败、沿用上次快照的歌单数
+        }
         stats: Dict[str, Any] = {
             "start_time": self._now(),
             "duration": 0,
@@ -828,32 +1094,50 @@ class MusicSubscribe(_PluginBase):
             "playlists": [],
             "missing": 0,
             "error": "",
+            "metrics": metrics,
         }
         try:
-            self._sync_all(stats)
+            self._sync_all(stats, metrics)
         except Exception as error:  # noqa: BLE001 - 异常要在日志与数据页都看得到
             stats["error"] = str(error)
             logger.error(f"歌单同步异常终止：{error}", exc_info=True)
         finally:
             # 所有歌单推完后统一登记缺失曲目，中途出错也不丢已发现的结果
+            mark = time.time()
             try:
                 stats["missing"] = self._flush_missing()
             except Exception as error:  # noqa: BLE001
                 logger.error(f"缺失曲目登记失败：{error}", exc_info=True)
+            metrics["missing_seconds"] = round(time.time() - mark, 2)
             stats["duration"] = round(time.time() - started, 1)
             self.save_data(SYNC_STATS_KEY, stats)
             logger.info(
                 f"歌单同步结束：耗时 {stats['duration']} 秒，库内缺失 {stats['missing']} 首"
-                + (f"，异常：{stats['error']}" if stats["error"] else ""))
+                f"（歌单快照 {metrics['fetch_seconds']} 秒 / 推送 {metrics['push_seconds']} 秒 /"
+                f" 媒体库请求 {metrics['library_requests']} 次"
+                + (f"，索引 {metrics['index_entries']} 首" if metrics["used_index"] else "")
+                + (f"，异常：{stats['error']}" if stats["error"] else "") + "）")
+            # 订阅历史治理：与同步解耦，失败不影响本轮结果
+            self._cleanup_history()
 
-    def _sync_all(self, stats: Dict[str, Any]) -> None:
-        """遍历媒体服务器与所有歌单配置。"""
+    def _sync_all(self, stats: Dict[str, Any], metrics: Dict[str, Any]) -> None:
+        """先拉全部歌单快照（一轮一次），再分发给各媒体服务器。"""
         if not self._has_source():
             logger.info("同步配置为空，不进行处理")
             return
         if not self._media_server:
             logger.info("没有可用的媒体服务器，不进行处理")
             return
+
+        mark = time.time()
+        snapshots, errors = self._fetch_snapshots()
+        metrics["fetch_seconds"] = round(time.time() - mark, 2)
+        metrics["reused_snapshot"] = sum(
+            1 for snap in snapshots.values() if snap.get("stale"))
+        for item in errors:
+            stats["playlists"].append(item)
+        if not snapshots:
+            logger.warning("本轮没有可用的歌单快照，跳过推送")
 
         for name in self._media_server:
             conf = self.media_config.get(name)
@@ -874,56 +1158,164 @@ class MusicSubscribe(_PluginBase):
             except Exception as error:  # noqa: BLE001
                 logger.error(f"媒体服务器[{name}]载入音乐库失败：{error}")
                 continue
-            self._sync_server(server, name, stats)
+            self._sync_server(server, name, stats, snapshots, metrics)
 
-    def _sync_server(self, server: Any, server_name: str, stats: Dict[str, Any]) -> None:
-        """把当前媒体服务器上该同步的歌单逐个推完。"""
-        logger.info(f"开始向媒体服务器[{server_name}]同步歌单")
+    # ------------------------------------------------------------------
+    # 歌单快照（一轮只拉一次，跨媒体服务器复用）
+    # ------------------------------------------------------------------
+
+    def _fetch_snapshots(self) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+        """把配置里的全部歌单各拉一次，成功与（沿用上次的）快照一起返回。
+
+        单个歌单读取失败时沿用上次的完整快照：媒体服务器侧照常推送，不会因为
+        平台临时抽风就把整轮同步作废。快照按配置行标签落盘，重启后仍可用。
+        """
+        snapshots: Dict[str, Dict[str, Any]] = {}
+        errors: List[Dict[str, Any]] = []
+        previous = self.get_data(SNAPSHOT_KEY) or {}
+        if not isinstance(previous, dict):
+            previous = {}
         for job in self._playlist_jobs():
             if job.error:
                 logger.warning(f"{job.source}配置不规范，已跳过：{job.label}（{job.error}）")
-                stats["playlists"].append({
-                    "server": server_name, "source": job.source, "name": job.label,
+                errors.append({
+                    "server": "-", "source": job.source, "name": job.label,
                     "status": "error", "message": job.error})
                 continue
             try:
                 produced = job.fetch()
             except Exception as error:  # noqa: BLE001 - 单个歌单失败不影响其它
+                old = previous.get(job.label)
+                if isinstance(old, dict) and old.get("items"):
+                    old = dict(old)
+                    old["stale"] = True
+                    snapshots[job.label] = old
+                    logger.warning(
+                        f"{job.source}[{job.label}]获取曲目失败，沿用上次快照"
+                        f"（{len(old.get('items') or [])} 组播放列表）：{error}")
+                    continue
                 logger.error(f"{job.source}[{job.label}]获取曲目失败：{error}")
-                stats["playlists"].append({
-                    "server": server_name, "source": job.source, "name": job.label,
+                errors.append({
+                    "server": "-", "source": job.source, "name": job.label,
                     "status": "error", "message": str(error)})
                 continue
-            for resolved_name, tracks in produced:
-                playlist = job.name or resolved_name
+            snapshots[job.label] = {
+                "source": job.source,
+                "name": job.name,
+                "users": list(job.users),
+                "items": [{"name": resolved_name, "tracks": self._snapshot_tracks(tracks)}
+                          for resolved_name, tracks in produced],
+                "time": self._now(),
+                "stale": False,
+            }
+        self.save_data(SNAPSHOT_KEY, snapshots)
+        return snapshots, errors
+
+    @staticmethod
+    def _snapshot_tracks(tracks: List[Track]) -> List[Dict[str, Any]]:
+        """曲目列表转可落盘结构（多歌手与来源身份一起保留）。"""
+        return [{**track.to_dict(), "artists": list(track.artists)} for track in tracks]
+
+    @staticmethod
+    def _restore_tracks(items: Any) -> List[Track]:
+        """快照曲目还原成 :class:`Track`（兼容只存了 artist 文本的老快照）。"""
+        tracks: List[Track] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            artists = item.get("artists")
+            if not isinstance(artists, list) or not artists:
+                artists = [name for name in str(item.get("artist") or "").split("、") if name]
+            try:
+                duration = int(item.get("duration") or 0)
+            except (TypeError, ValueError):
+                duration = 0
+            tracks.append(Track(
+                title=str(item.get("title") or ""),
+                artists=[str(name) for name in artists],
+                album=str(item.get("album") or ""),
+                duration=duration,
+                platform=str(item.get("platform") or ""),
+                source_id=str(item.get("source_id") or ""),
+                album_id=str(item.get("album_id") or ""),
+            ))
+        return tracks
+
+    def _sync_server(self, server: Any, server_name: str, stats: Dict[str, Any],
+                     snapshots: Dict[str, Dict[str, Any]], metrics: Dict[str, Any]) -> None:
+        """把本轮快照推送到一台媒体服务器（曲库索引在此建立，整台复用）。"""
+        logger.info(f"开始向媒体服务器[{server_name}]同步歌单")
+        index = self._build_index(server, server_name, snapshots, metrics)
+        mark = time.time()
+        for label, snapshot in snapshots.items():
+            source = snapshot.get("source") or ""
+            users = snapshot.get("users") or []
+            for entry in snapshot.get("items") or []:
+                playlist = snapshot.get("name") or entry.get("name") or ""
+                tracks = self._restore_tracks(entry.get("tracks"))
                 if not playlist or not tracks:
                     reason = "歌单名为空" if not playlist else "歌单没有曲目"
-                    logger.warning(f"{job.source}[{job.label}]{reason}，跳过")
+                    logger.warning(f"{source}[{label}]{reason}，跳过")
                     stats["playlists"].append({
-                        "server": server_name, "source": job.source, "name": job.label,
+                        "server": server_name, "source": source, "name": label,
                         "status": "error", "message": reason})
                     continue
                 try:
-                    added, missing = self._push(server, playlist, tracks, job.users)
+                    added, missing = self._push(server, playlist, tracks, users, index)
                 except Exception as error:  # noqa: BLE001
-                    logger.error(f"{job.source}同步播放列表[{playlist}]失败：{error}")
+                    logger.error(f"{source}同步播放列表[{playlist}]失败：{error}")
                     stats["playlists"].append({
-                        "server": server_name, "source": job.source, "name": playlist,
+                        "server": server_name, "source": source, "name": playlist,
                         "total": len(tracks), "status": "error", "message": str(error)})
                     continue
-                self._collect_missing(job.source, server_name, playlist, missing)
+                if index is None:
+                    # 没走索引：每首歌一次检索（供数据页对比）
+                    metrics["library_requests"] += len(tracks)
+                self._collect_missing(source, server_name, playlist, missing)
                 stats["playlists"].append({
-                    "server": server_name, "source": job.source, "name": playlist,
+                    "server": server_name, "source": source, "name": playlist,
                     "total": len(tracks), "added": added, "missing": len(missing),
-                    "status": "ok", "message": ""})
+                    "status": "stale" if snapshot.get("stale") else "ok",
+                    "message": "歌单读取失败，本次沿用上次快照" if snapshot.get("stale") else ""})
+        metrics["push_seconds"] = round(
+            (metrics.get("push_seconds") or 0.0) + (time.time() - mark), 2)
         logger.info(f"媒体服务器[{server_name}]歌单同步完成")
 
+    def _build_index(self, server: Any, server_name: str,
+                     snapshots: Dict[str, Dict[str, Any]],
+                     metrics: Dict[str, Any]) -> Optional[LibraryIndex]:
+        """按媒体服务器建立曲库索引；失败或未配置时返回 None（退回逐歌检索）。"""
+        if not self._library_index:
+            return None
+        builder = getattr(server, "build_index", None)
+        if not callable(builder):
+            return None
+        wanted: List[Track] = []
+        for snapshot in snapshots.values():
+            for entry in snapshot.get("items") or []:
+                wanted.extend(self._restore_tracks(entry.get("tracks")))
+        index = LibraryIndex()
+        try:
+            info = index.build(builder, wanted=wanted)
+        except Exception as error:  # noqa: BLE001 - 索引失败不影响同步，退回逐歌检索
+            logger.warning(f"媒体服务器[{server_name}]曲库索引建立失败，本轮退回逐歌检索：{error}")
+            metrics["used_index"] = False
+            return None
+        metrics["used_index"] = True
+        metrics["index_entries"] = index.size
+        metrics["library_requests"] += 1  # 建索引那一次全库请求
+        logger.info(f"媒体服务器[{server_name}]启用曲库索引：{index.size} 首"
+                    f"（{info.get('seconds')} 秒），本轮逐歌匹配不再请求媒体库")
+        return index
+
     def _push(self, server: Any, playlist: str, tracks: List[Track],
-              users: List[str]) -> Tuple[int, List[Track]]:
-        """调用具体媒体服务器的推送实现。"""
+              users: List[str], index: Optional[LibraryIndex] = None,
+              ) -> Tuple[int, List[Track]]:
+        """调用具体媒体服务器的推送实现（带上曲库索引）。"""
         if isinstance(server, EmbyMusic):
-            return server.push(playlist, tracks, users=users, exact_match=self._exact_match)
-        return server.push(playlist, tracks, exact_match=self._exact_match)
+            return server.push(playlist, tracks, users=users, exact_match=self._exact_match,
+                               index=index)
+        return server.push(playlist, tracks, exact_match=self._exact_match, index=index)
 
     def _create_server(self, conf: Any) -> Optional[Any]:
         """按媒体服务器类型创建客户端。"""

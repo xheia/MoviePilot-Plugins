@@ -46,7 +46,25 @@
         <span class="ms-stat__num">{{ syncMissing }}</span>
         <span class="ms-stat__label">上次同步缺失</span>
       </div>
+      <div v-if="running" class="ms-stat ms-stat--plain ms-stat--run">
+        <span class="ms-stat__num">进行中</span>
+        <span class="ms-stat__label">歌单同步</span>
+      </div>
+      <div v-else-if="stats.metrics" class="ms-stat ms-stat--plain">
+        <span class="ms-stat__num">{{ stats.metrics.library_requests ?? 0 }}</span>
+        <span class="ms-stat__label">媒体库请求</span>
+      </div>
     </div>
+
+    <p v-if="stats.metrics" class="ms-metrics">
+      分段耗时：拉取歌单 {{ stats.metrics.fetch_seconds ?? 0 }} 秒 ·
+      推送 {{ stats.metrics.push_seconds ?? 0 }} 秒 ·
+      登记缺失 {{ stats.metrics.missing_seconds ?? 0 }} 秒
+      <template v-if="stats.metrics.used_index"> · 曲库索引 {{ stats.metrics.index_entries ?? 0 }} 首</template>
+      <template v-else> · 未启用曲库索引</template>
+      <template v-if="stats.metrics.reused_snapshot"> · {{ stats.metrics.reused_snapshot }} 个歌单沿用上次快照</template>
+      <template v-if="stats.skipped_at"> · {{ stats.skipped_at }} 跳过过一次触发</template>
+    </p>
 
     <v-alert v-if="error" class="mx-3 mb-2" density="compact" type="warning" variant="tonal">{{ error }}</v-alert>
     <v-alert v-if="result" class="mx-3 mb-2" density="compact"
@@ -108,6 +126,7 @@
                   <span v-if="row.hits > 1"> · 命中 {{ row.hits }} 次</span>
                   <span v-if="row.subscribe_message" class="ms-fail"> ·
                     上次订阅失败：{{ row.subscribe_message }}</span>
+                  <span v-if="row.retry_in > 0" class="ms-cool"> · {{ retryText(row.retry_in) }}后自动重试</span>
                 </div>
               </td>
               <td class="col-dur">{{ row.duration_text || '-' }}</td>
@@ -242,6 +261,8 @@ const historyItems = ref([])
 const summary = reactive({ total: 0, failed: 0 })
 const historySummary = reactive({ total: 0, song: 0, album: 0 })
 const stats = ref({})
+// 是否有同步正在运行（清单接口回传，用于数据页展示运行状态）
+const running = ref(false)
 const targets = ref([{ value: 'song', label: '歌曲' }, { value: 'album', label: '专辑' }])
 const targetOptions = [{ value: 'song', label: '歌曲' }, { value: 'album', label: '专辑' }]
 const targetFilter = ref(null)
@@ -256,6 +277,13 @@ const pageSize = ref(20)
 const picks = reactive({})
 
 const syncMissing = computed(() => Number(stats.value?.missing) || 0)
+
+// 失败冷却剩余秒数的可读文案（不足 1 分钟按 1 分钟算）
+function retryText(seconds) {
+  const total = Math.max(1, Math.ceil(Number(seconds) / 60))
+  if (total < 60) return `约 ${total} 分钟`
+  return `约 ${Math.round(total / 60)} 小时`
+}
 
 const statCards = computed(() => [
   { key: 'all', label: '待处理', count: summary.total },
@@ -333,6 +361,7 @@ async function load() {
     Object.assign(summary, res?.summary || { total: 0, failed: 0 })
     Object.assign(historySummary, res?.history || { total: 0, song: 0, album: 0 })
     stats.value = res?.stats || {}
+    running.value = !!res?.running
     if (Array.isArray(res?.targets) && res.targets.length) targets.value = res.targets
     const alive = new Set(items.value.map(i => Number(i.seq)))
     Object.keys(picks).forEach(seq => { if (!alive.has(Number(seq))) delete picks[seq] })
@@ -443,6 +472,10 @@ async function subscribePicked() {
       result.value = failed.length
         ? `订阅完成：${payload.length - failed.length} 条订阅成功（可在「订阅历史」里查看），${failed.length} 条失败：${detail}`
         : (res.message || '订阅完成')
+      // 订阅成功即入宿主搜索队列（可在配置里关闭）
+      if (res.search_queued > 0) {
+        result.value += `；${res.search_queued} 个订阅已送入宿主搜索队列`
+      }
       clearPick()
       await load()
     } else {
@@ -611,6 +644,29 @@ button.ms-stat {
 
 .ms-stat--plain {
   cursor: default;
+}
+
+/* 同步进行中：主色描边，和筛选卡片区分 */
+.ms-stat--run {
+  border-color: rgb(var(--v-theme-primary));
+  background: rgba(var(--v-theme-primary), 0.12);
+}
+
+.ms-stat--run .ms-stat__num {
+  color: rgb(var(--v-theme-primary));
+}
+
+/* 分段耗时等运行指标（一行小字） */
+.ms-metrics {
+  margin: 0 16px 8px;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: rgba(var(--v-theme-on-surface), 0.55);
+}
+
+/* 失败冷却倒计时 */
+.ms-cool {
+  color: rgb(var(--v-theme-warning));
 }
 
 .ms-stat__num {

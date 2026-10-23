@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 from .music.sourcelink import source_links as _build_source_links
@@ -21,6 +22,8 @@ PENDING_LIMIT = 1000
 HISTORY_KEY = "subscribe_history"
 #: 历史条数上限，超出后丢弃最早的记录
 HISTORY_LIMIT = 1000
+#: 订阅历史保留天数：超过这个年限、且已不在宿主订阅列表里的才清理
+HISTORY_KEEP_DAYS = 90
 
 
 def pending_key(title: str, artist: str = "") -> str:
@@ -146,6 +149,33 @@ class PendingStore:
                 target.update(item)
         self.save(records)
 
+    def flush(self, updates: Optional[List[Dict[str, Any]]] = None,
+              done_seqs: Optional[List[Any]] = None) -> None:
+        """一次读-改-写完成「回写失败原因 + 移除成功行」。
+
+        批量订阅时避免「每条一次全量写盘」：调用方在内存里攒批，这里一次性落盘。
+        """
+        updates = updates or []
+        if not updates and not done_seqs:
+            return
+        records = self.records()
+        if updates:
+            index = {item.get("key"): item for item in records}
+            for item in updates:
+                target = index.get(item.get("key"))
+                if target is not None:
+                    target.update(item)
+        if done_seqs:
+            wanted = set()
+            for item in done_seqs:
+                try:
+                    wanted.add(int(item))
+                except (TypeError, ValueError):
+                    continue
+            records = [item for item in records
+                       if int(item.get("seq") or 0) not in wanted]
+        self.save(records)
+
     # ------------------------------------------------------------------
     # 选取与清理
     # ------------------------------------------------------------------
@@ -258,6 +288,47 @@ class HistoryStore:
         records = self._records_chronological()
         self.save([])
         return len(records)
+
+    def prune(self, keep_days: int = HISTORY_KEEP_DAYS,
+              active_ids: Optional[set] = None) -> int:
+        """清理过期历史：超过 ``keep_days`` 天、且不在 ``active_ids`` 里的才删。
+
+        正在宿主订阅列表里的历史一律保留（用户可能还要回去点链接核对），
+        因此清理前需要先查一遍宿主订阅 ID。
+
+        :return: 被清理的条数。
+        """
+        records = self._records_chronological()
+        if not records:
+            return 0
+        deadline = datetime.now() - timedelta(days=max(0, int(keep_days or 0)))
+        alive = {int(item) for item in (active_ids or set()) if str(item).isdigit()}
+        kept: List[Dict[str, Any]] = []
+        removed = 0
+        for item in records:
+            sub_id = item.get("subscribe_id")
+            try:
+                sub_id = int(sub_id or 0)
+            except (TypeError, ValueError):
+                sub_id = 0
+            if self._parse_time(item.get("time")) < deadline and sub_id not in alive:
+                removed += 1
+                continue
+            kept.append(item)
+        if removed:
+            self.save(kept)
+        return removed
+
+    @staticmethod
+    def _parse_time(value: Any) -> datetime:
+        """解析历史时间；识别不出按「很久以前」处理（会被清理）。"""
+        text = str(value or "").strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return datetime.min
 
     def summary(self) -> Dict[str, int]:
         """历史概览：条数与按订阅粒度分类的条数。"""

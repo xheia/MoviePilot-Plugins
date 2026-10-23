@@ -22,6 +22,11 @@ DEFAULT_NCM_API_URL = "http://192.168.1.100:1630"
 #: 订阅人默认值（写到宿主订阅记录的 username 上，便于在订阅列表里区分来源）
 DEFAULT_SUBSCRIBE_USER = "歌单订阅"
 
+#: 订阅并发数默认 2 路（搜索 / 识别 / 订阅三步都是网络往返，并行能缩短总耗时）
+DEFAULT_SUBSCRIBE_WORKERS = 2
+#: 订阅并发数上限（再高对接口方与宿主都是压力）
+MAX_SUBSCRIBE_WORKERS = 8
+
 #: bitmagnet 单次检索返回的种子条数上限（超过 100 对自建实例压力偏大）
 DEFAULT_BITMAGNET_LIMIT = 20
 MAX_BITMAGNET_LIMIT = 100
@@ -36,6 +41,12 @@ DEFAULTS: Dict[str, Any] = {
     "exact_match": True,
     # 缺失曲目订阅
     "subscribe_user": DEFAULT_SUBSCRIBE_USER,
+    # 订阅并发数（1-8）：同时搜索 / 识别 / 订阅的条数
+    "subscribe_workers": DEFAULT_SUBSCRIBE_WORKERS,
+    # 订阅成功后立即送入宿主原生搜索队列并后台唤醒
+    "immediate_search": True,
+    # 启用曲库索引（每轮每台媒体库 1 次全库请求，替代逐歌检索）
+    "library_index": True,
     # 网易云
     "ncm_api_url": DEFAULT_NCM_API_URL,
     "wymusic_paths": "",
@@ -63,7 +74,8 @@ DEFAULTS: Dict[str, Any] = {
 
 #: 布尔配置项
 _BOOL_KEYS = ("enabled", "exact_match", "wy_daily_list", "wy_daily_song",
-              "search_enabled", "download_enabled", "bitmagnet_enabled")
+              "search_enabled", "download_enabled", "bitmagnet_enabled",
+              "immediate_search", "library_index")
 #: 字符串配置项
 _STR_KEYS = (
     "cron", "ncm_api_url", "wymusic_paths", "qqmusic_paths",
@@ -71,6 +83,10 @@ _STR_KEYS = (
     "spotify_client_id", "spotify_client_secret", "other_paths",
     "bitmagnet_url", "bitmagnet_api_key",
 )
+#: 整数配置项（收敛到 [下限, 上限]，非法值回退默认）
+_INT_KEYS: Dict[str, Tuple[int, int]] = {
+    "subscribe_workers": (1, MAX_SUBSCRIBE_WORKERS),
+}
 
 #: 允许的下载格式（默认 flac）
 _DOWNLOAD_FORMATS = ("flac", "mp3", "m4a", "wav", "ogg")
@@ -113,6 +129,13 @@ def normalize(config: Dict[str, Any] = None) -> Dict[str, Any]:
     except (TypeError, ValueError):
         limit = DEFAULT_BITMAGNET_LIMIT
     data["bitmagnet_limit"] = max(1, min(MAX_BITMAGNET_LIMIT, limit))
+    # 整数配置项收敛到上下限之间（超上限收敛到上限，低于下限收敛到下限）
+    for key, (low, high) in _INT_KEYS.items():
+        try:
+            number = int(raw.get(key, data[key]))
+        except (TypeError, ValueError):
+            continue
+        data[key] = max(low, min(high, number))
     servers = raw.get("media_server")
     if isinstance(servers, str):
         servers = [item.strip() for item in servers.split(",") if item.strip()]

@@ -14,7 +14,8 @@ from app.schemas import MediaServerLibrary
 from app.sdk.logging import logger
 from app.sdk.services import MusicMediaServerHelper
 
-from .track import Track
+from .index import IndexEntry
+from .track import Track, compact_text
 
 
 class PlexMusic(Plex):
@@ -91,8 +92,12 @@ class PlexMusic(Plex):
             return []
 
     def push(self, playlist_title: str, tracks: List[Track], exact_match: bool = True,
-             ) -> Tuple[int, List[Track]]:
-        """把曲目推送进播放列表，返回 ``(新增条数, 库内缺失的曲目)``。"""
+             index: Any = None) -> Tuple[int, List[Track]]:
+        """把曲目推送进播放列表，返回 ``(新增条数, 库内缺失的曲目)``。
+
+        :param index: 可选的曲库索引（:class:`~music.index.LibraryIndex`）；
+            带上后逐曲匹配在本地完成，不再向媒体库发检索请求。
+        """
         if not tracks:
             return 0, []
         server = self.server
@@ -105,7 +110,7 @@ class PlexMusic(Plex):
             if not track.title or track.title in existing:
                 continue
             try:
-                items = self.search(track, exact_match)
+                items = self._locate(track, exact_match, index)
             except Exception as error:  # noqa: BLE001 - 单曲搜索失败不影响整单
                 logger.error(f"Plex搜索曲目[{track.title}]失败：{error}")
                 items = []
@@ -142,6 +147,65 @@ class PlexMusic(Plex):
             self.server.playlist(playlist_title).addItems(items)
         except Exception as error:  # noqa: BLE001
             logger.error(f"Plex向播放列表[{playlist_title}]追加歌曲失败：{error}")
+
+    # ------------------------------------------------------------------
+    # 曲库索引（一轮一次全库拉取，替代逐歌检索）
+    # ------------------------------------------------------------------
+
+    def build_index(self) -> List[IndexEntry]:
+        """拉一次全库曲目建立索引条目列表。
+
+        走媒体库级 ``section.searchTracks()``（不带标题即
+        ``GET /library/sections/{key}/all?type=10``），一次请求拿完整库。
+        """
+        server = self.server
+        if not server:
+            raise RuntimeError("Plex未连接")
+        sections = self._sections
+        if not sections:
+            try:
+                sections = [
+                    section for section in server.library.sections()
+                    if section.type in ("artist", "music")
+                ]
+            except Exception as error:  # noqa: BLE001
+                logger.error(f"Plex获取音乐媒体库失败：{error}")
+                raise RuntimeError(f"Plex获取音乐媒体库失败：{error}") from error
+        entries: List[IndexEntry] = []
+        for section in sections:
+            try:
+                items = section.searchTracks()
+            except Exception as error:  # noqa: BLE001
+                logger.error(f"Plex媒体库[{getattr(section, 'title', '?')}]拉取全库失败：{error}")
+                raise RuntimeError(f"Plex拉取全库曲目失败：{error}") from error
+            for item in items or []:
+                entries.append(self._index_entry(item))
+        if not entries:
+            raise RuntimeError("Plex音乐库为空或未取到曲目")
+        return entries
+
+    def _index_entry(self, item: Any) -> IndexEntry:
+        """把一个 Plex 音频条目转成索引条目。"""
+        artists: List[str] = []
+        for name in ("grandparentTitle", "originalTitle"):
+            value = getattr(item, name, None)
+            if value:
+                artists.append(str(value))
+        album = getattr(item, "albumTitle", None) or getattr(item, "parentTitle", None) or ""
+        return IndexEntry(
+            ref=item,
+            title=str(getattr(item, "title", "") or ""),
+            artists=[compact_text(name) for name in artists],
+            album=compact_text(album),
+            bitrate=self._bitrate(item),
+        )
+
+    def _locate(self, track: Track, exact_match: bool, index: Any = None) -> List[Any]:
+        """定位一首歌在库里的条目：有索引走本地匹配，没有则实时检索。"""
+        if index is not None:
+            entry = index.match(track, exact_match)
+            return [entry.ref] if entry is not None else []
+        return self.search(track, exact_match)
 
     # ------------------------------------------------------------------
     # 曲目检索

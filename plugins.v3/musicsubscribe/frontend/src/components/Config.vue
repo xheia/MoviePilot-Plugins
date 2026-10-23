@@ -61,6 +61,20 @@
             <h3 class="ms-section__title">缺失曲目订阅</h3>
             <v-text-field v-model="form.subscribe_user" label="订阅人" placeholder="歌单订阅"
               hint="写到宿主订阅记录的「用户」栏位上，便于在订阅列表里区分是谁订的" persistent-hint />
+            <div class="ms-row">
+              <v-text-field v-model.number="form.subscribe_workers" class="ms-row__grow" type="number" min="1"
+                max="8" step="1" label="订阅并发数" hint="同时搜索 / 识别 / 订阅的条数（1-8）" persistent-hint />
+            </div>
+            <v-switch v-model="form.immediate_search" color="primary" inset>
+              <template #label><span class="ms-label">订阅后立即搜索</span></template>
+            </v-switch>
+            <p class="ms-hint">开启时订阅成功即送入宿主的原生搜索队列（等同手动点「搜索」）并后台唤醒；
+              关闭则等宿主自己的调度处理。</p>
+            <v-switch v-model="form.library_index" color="primary" inset>
+              <template #label><span class="ms-label">启用曲库索引</span></template>
+            </v-switch>
+            <p class="ms-hint">开启时每轮同步先把整个音乐库拉一次建立索引，逐曲匹配不再请求媒体库
+              （几千首的库也能把媒体库请求压到 1 次）；关闭后按老办法每首歌检索一次。</p>
             <p class="ms-hint">缺失曲目的搜索、识别、订阅都走宿主的官方音乐接口，插件不指定任何音乐来源
               （搜哪些库由宿主自己的音乐元数据源设置决定）。</p>
           </section>
@@ -269,8 +283,28 @@
                   class="ms-stat__label">歌单数</span></div>
               <div class="ms-stat"><span class="ms-stat__num">{{ addedTotal }}</span><span
                   class="ms-stat__label">新增曲目</span></div>
+              <div class="ms-stat">
+                <span class="ms-stat__num">{{ metrics.index_entries || 0 }}</span><span
+                  class="ms-stat__label">{{ metrics.used_index ? '索引曲目' : '未用索引' }}</span>
+              </div>
+              <div class="ms-stat">
+                <span class="ms-stat__num">{{ metrics.library_requests || 0 }}</span><span
+                  class="ms-stat__label">媒体库请求</span>
+              </div>
             </div>
-            <p class="ms-hint">上次开始时间：{{ stats.start_time }}<span v-if="stats.error">（异常：{{ stats.error }}）</span></p>
+            <p class="ms-hint">
+              上次开始时间：{{ stats.start_time }}<span v-if="stats.error">（异常：{{ stats.error }}）</span>
+              <span v-if="running" class="ms-chip ms-chip--warn">同步进行中</span>
+              <span v-else-if="stats.skipped_at" class="ms-chip ms-chip--muted">
+                {{ stats.skipped_at }} 有一次触发被跳过（已有同步在跑）
+              </span>
+            </p>
+            <p class="ms-hint">
+              分段耗时：拉取歌单 {{ metrics.fetch_seconds ?? 0 }} 秒 ·
+              推送播放列表 {{ metrics.push_seconds ?? 0 }} 秒 ·
+              登记缺失 {{ metrics.missing_seconds ?? 0 }} 秒
+              <template v-if="metrics.reused_snapshot">（{{ metrics.reused_snapshot }} 个歌单读取失败，沿用了上次快照）</template>
+            </p>
             <table v-if="(stats.playlists || []).length" class="ms-table">
               <thead>
                 <tr>
@@ -331,6 +365,9 @@ const DEFAULTS = {
   media_server: [],
   exact_match: true,
   subscribe_user: '歌单订阅',
+  subscribe_workers: 2,
+  immediate_search: true,
+  library_index: true,
   ncm_api_url: '',
   wymusic_paths: '',
   wy_daily_list: false,
@@ -411,6 +448,9 @@ async function testBitmagnet() {
 const addedTotal = computed(() =>
   (stats.value.playlists || []).reduce((sum, p) => sum + (p.added || 0), 0))
 
+// 分段耗时 / 索引 / 媒体库请求等运行指标（v2.4.0 新增）
+const metrics = computed(() => stats.value.metrics || {})
+
 const dirty = computed(() => JSON.stringify({ ...form }) !== baseline)
 
 function call(method, path, data) {
@@ -434,6 +474,7 @@ async function loadStatus() {
     platforms.value = Array.isArray(res?.platforms) ? res.platforms : []
     username.value = res?.username || ''
     stats.value = res?.stats || {}
+    running.value = !!res?.running
     loaded.value = true
   } catch (e) {
     error.value = '加载插件状态失败：' + (e?.message || e)
@@ -568,6 +609,7 @@ async function refreshStats() {
   try {
     const res = await call('get', `${PLUGIN}/status`)
     stats.value = res?.stats || {}
+    running.value = !!res?.running
     username.value = res?.username || username.value
   } catch { /* 静默：状态刷新失败不影响配置编辑 */ }
 }

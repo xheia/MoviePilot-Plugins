@@ -14,7 +14,8 @@ from app.sdk.config import settings
 from app.sdk.logging import logger
 from app.sdk.network import RequestUtils
 
-from .track import Track
+from .index import IndexEntry
+from .track import Track, compact_text
 
 
 class EmbyMusic(Emby):
@@ -117,11 +118,14 @@ class EmbyMusic(Emby):
         )
 
     def push(self, playlist_title: str, tracks: List[Track], users: Optional[List[str]] = None,
-             exact_match: bool = True) -> Tuple[int, List[Track]]:
+             exact_match: bool = True, index: Any = None) -> Tuple[int, List[Track]]:
         """把曲目推送进播放列表，返回 ``(新增条数, 库内缺失的曲目)``。
 
         Emby 的播放列表按用户隔离：``users`` 的第一位用于检索与创建，
         其余用户直接复用已解析出的曲目 ID 追加，避免重复搜索。
+
+        :param index: 可选的曲库索引（:class:`~music.index.LibraryIndex`）；
+            带上后逐曲匹配在本地完成，不再向媒体库发检索请求。
         """
         if not tracks:
             return 0, []
@@ -139,7 +143,7 @@ class EmbyMusic(Emby):
         for track in tracks:
             if not track.title or track.title in known:
                 continue
-            ids, _ = self.search(track, exact_match)
+            ids, _ = self._locate(track, exact_match, index)
             if ids:
                 found_ids.append(ids[0])
             else:
@@ -231,6 +235,67 @@ class EmbyMusic(Emby):
             return True
         joined = " ".join(names)
         return any(artist and artist in joined for artist in artists)
+
+    # ------------------------------------------------------------------
+    # 曲库索引（一轮一次全库拉取，替代逐歌检索）
+    # ------------------------------------------------------------------
+
+    #: 全库分页拉取的单页条数与总条数兜底上限
+    _INDEX_PAGE = 500
+    _INDEX_MAX = 100000
+
+    def build_index(self) -> List[IndexEntry]:
+        """分页拉一次全库音频曲目，建立索引条目列表。"""
+        if not self.ready:
+            raise RuntimeError("Emby 未连接（缺少地址或密钥）")
+        entries: List[IndexEntry] = []
+        start = 0
+        while len(entries) < self._INDEX_MAX:
+            url = (
+                f"{self._host}emby/Users/{self.user}/Items"
+                f"?Recursive=true&IncludeItemTypes=Audio"
+                f"&Fields=Artists,Album,AlbumArtist"
+                f"&StartIndex={start}&Limit={self._INDEX_PAGE}&api_key={self._apikey}"
+            )
+            try:
+                response = self.get_data(url)
+                payload = response.json()
+            except Exception as error:  # noqa: BLE001
+                raise RuntimeError(f"Emby拉取全库曲目失败：{error}") from error
+            items = payload.get("Items") or []
+            for item in items:
+                if item.get("Type") == "Audio":
+                    entries.append(self._index_entry(item))
+            if not items or len(entries) >= int(payload.get("TotalRecordCount") or 0):
+                break
+            start += self._INDEX_PAGE
+        if not entries:
+            raise RuntimeError("Emby音乐库为空或未取到曲目")
+        return entries
+
+    @staticmethod
+    def _index_entry(item: Dict[str, Any]) -> IndexEntry:
+        """把一个 Emby 音频条目转成索引条目。"""
+        artists = item.get("Artists") or []
+        if not artists and item.get("AlbumArtist"):
+            artists = [item.get("AlbumArtist")]
+        return IndexEntry(
+            ref=item,
+            title=str(item.get("Name") or ""),
+            artists=[compact_text(name) for name in artists],
+            album=compact_text(item.get("Album") or ""),
+            bitrate=0,
+        )
+
+    def _locate(self, track: Track, exact_match: bool, index: Any = None) -> Tuple[List[str], List[str]]:
+        """定位一首歌在库里的条目：有索引走本地匹配，没有则实时检索。"""
+        if index is None:
+            return self.search(track, exact_match)
+        entry = index.match(track, exact_match)
+        if entry is None:
+            return [], []
+        key = entry.key
+        return ([str(key)] if key else []), [entry.title]
 
     #: 兼容旧调用名
     def get_music_library(self) -> List[MediaServerLibrary]:

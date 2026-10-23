@@ -93,6 +93,27 @@ def pick_first(mapping: Optional[Dict[str, Any]], *keys: str) -> Any:
     return None
 
 
+def compact_text(text: Any) -> str:
+    """比较用的紧凑文本：忽略大小写、空白、标点与括号说明。
+
+    媒体库检索、候选匹配、宿主订阅列表去重共用这一套语义，避免同一首歌
+    因为 ``（Live）`` / `` feat. `` 之类的尾巴被判成两首。
+    """
+    return "".join(ch for ch in strip_brackets(text).casefold() if ch.isalnum())
+
+
+def same_or_contains(left: Any, right: Any) -> bool:
+    """两个紧凑文本互相包含即视为同一首歌 / 同一位歌手 / 同一张专辑。
+
+    音乐源的命名差异很大（副标题、译名、`` feat. `` 后缀），互相包含比全等
+    更宽容，又比纯子串匹配更不容易串歌；任一侧为空时不过滤。
+    """
+    a, b = compact_text(left), compact_text(right)
+    if not a or not b:
+        return True
+    return a in b or b in a
+
+
 @dataclass
 class Track:
     """一首曲目。"""

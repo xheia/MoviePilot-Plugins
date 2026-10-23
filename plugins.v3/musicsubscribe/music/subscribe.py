@@ -17,10 +17,14 @@
 
 订阅粒度由用户在缺失清单上逐行选择：选「歌曲」按单曲订阅，选「专辑」按所在专辑
 订阅（宿主要求专辑识别结果带曲目总数，缺失则按失败处理）。
+
+订阅时会把来源标签写进宿主订阅记录的 ``source``（如 ``歌单订阅:Plex/我的收藏``），
+在宿主的订阅列表里就能区分这条订阅是哪个插件、从哪来。
 """
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.sdk.logging import logger
@@ -70,6 +74,8 @@ class MusicSubscriber:
         #: 键为 ``(music_type, title, artist, album)``，值为 ``(来源, 媒体ID, 曲目总数)`` 或 None。
         #: 缓存很有必要：一次识别至少是一次网络往返，批量订阅时同一首歌会被反复问到。
         self._cache: Dict[Tuple[str, str, str, str], Optional[Tuple[Any, str, int]]] = {}
+        #: 并行订阅时缓存会被多个线程同时读写，加锁保证淘汰逻辑不错乱
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 对外入口
@@ -82,11 +88,19 @@ class MusicSubscriber:
 
     def reset(self) -> None:
         """换一轮（或换一次用户操作）时清空识别缓存。"""
-        self._cache = {}
+        with self._lock:
+            self._cache = {}
 
-    def subscribe(self, track: Track, target: str = TARGET_SONG) -> Dict[str, Any]:
+    def fail(self, message: str, display: str = "") -> Dict[str, Any]:
+        """构造一条失败结果（并行订阅里工作线程异常时也要能返回）。"""
+        return self._fail(message, display=display)
+
+    def subscribe(self, track: Track, target: str = TARGET_SONG,
+                  source_label: str = "") -> Dict[str, Any]:
         """订阅一首歌或它所在的专辑。
 
+        :param source_label: 写到宿主订阅记录 ``source`` 上的来源标签
+            （如 ``歌单订阅:Plex/我的收藏``），便于在订阅列表里追溯；为空则交给宿主。
         :return: ``{ok, id, type, keyword, message, source, media_id, links}``；
             ``ok=False`` 时 ``message`` 说明原因（未搜到 / 未识别到身份 /
             专辑曲目数未知 / 订阅链拒绝等）；``links`` 为来源链接
@@ -117,19 +131,15 @@ class MusicSubscriber:
             return self._fail("专辑曲目总数未知，无法订阅专辑", display=display)
 
         links = self.source_links(track)
-        try:
-            subscribe_id, message = SubscribeChain().add(
-                title=display,
-                year="",
-                mtype=MediaType.MUSIC,
-                music_type=music_type,
-                media_source=media_source,
-                media_id=media_id,
-                username=self._username or None,
-                exist_ok=True,
-                message=False,
-            )
-        except TypeError:  # 旧宿主的 add() 没有 username 参数
+        # 依次尝试带齐参数的调用，老宿主缺哪个参数就退化到哪个签名
+        attempts = [
+            {"username": self._username or None, "source": source_label or None},
+            {"username": self._username or None},
+            {},
+        ]
+        subscribe_id = None
+        message = ""
+        for extra in attempts:
             try:
                 subscribe_id, message = SubscribeChain().add(
                     title=display,
@@ -140,13 +150,17 @@ class MusicSubscriber:
                     media_id=media_id,
                     exist_ok=True,
                     message=False,
+                    **extra,
                 )
+                break
+            except TypeError:  # 旧宿主没有对应参数，退一级
+                continue
             except Exception as error:  # noqa: BLE001 - 单条失败不影响其它
                 logger.warning(f"音乐订阅失败[{display}]：{error}")
                 return self._fail(f"订阅失败：{error}", display=display)
-        except Exception as error:  # noqa: BLE001 - 单条失败不影响其它
-            logger.warning(f"音乐订阅失败[{display}]：{error}")
-            return self._fail(f"订阅失败：{error}", display=display)
+        else:
+            logger.warning(f"音乐订阅失败[{display}]：宿主 add() 签名不兼容")
+            return self._fail("订阅失败：宿主订阅接口签名不兼容", display=display)
 
         message = str(message or "")
         if subscribe_id:
@@ -167,16 +181,18 @@ class MusicSubscriber:
     # ------------------------------------------------------------------
 
     def _resolve(self, music_type: str, track: Track) -> Optional[Tuple[Any, str, int]]:
-        """带缓存地定位一首歌 / 一张专辑的身份。"""
+        """带缓存地定位一首歌 / 一张专辑的身份（多线程安全）。"""
         if not (track.title or track.album):
             return None
         key = (music_type, track.title, track.artist, track.album or "")
-        if key in self._cache:
-            return self._cache[key]
-        while len(self._cache) >= self.CACHE_LIMIT:
-            self._cache.pop(next(iter(self._cache)), None)
+        with self._lock:
+            if key in self._cache:
+                return self._cache[key]
+            while len(self._cache) >= self.CACHE_LIMIT:
+                self._cache.pop(next(iter(self._cache)), None)
         value = self._resolve_uncached(music_type, track)
-        self._cache[key] = value
+        with self._lock:
+            self._cache[key] = value
         return value
 
     def _resolve_uncached(self, music_type: str, track: Track
@@ -197,8 +213,8 @@ class MusicSubscriber:
             if not self._match(music_type, track, info):
                 continue
             tracks = self._album_tracks(music_type, source, str(media_id), info)
-            return (source, str(media_id), tracks), info
-        return None, None
+            return source, str(media_id), tracks
+        return None
 
     def _candidates(self, music_type: str, track: Track) -> List[Any]:
         """按多个查询词依次搜索，合并去重后返回候选（最多 CANDIDATE_LIMIT 条）。"""
