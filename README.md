@@ -16,7 +16,6 @@ https://github.com/xheia/MoviePilot-Plugins
 | 插件 | 目录 | 版本 | 上游来源 | 说明 |
 | --- | --- | --- | --- | --- |
 | 歌单同步工具 SyncMusicList | `plugins.v2/syncmusiclist` | 7.2 | [baozaodetudou/MoviePilot-Plugins](https://github.com/baozaodetudou/MoviePilot-Plugins)（逗猫）v7.2 | 同步 QQ/网易云歌单到 Plex/Emby；本地增强网易云登录，见 [插件 README](plugins.v2/syncmusiclist/README.md) |
-| 歌单同步工具 SyncMusicList | `plugins.v3/syncmusiclist` | 8.1.1 | 同上（上游 v7.2 → 本地 V2 → 本地 V3） | V3 专用：网易云改走本地 [ncm-api](https://hub.docker.com/r/moefurina/ncm-api)，见 [插件 README](plugins.v3/syncmusiclist/README.md) |
 | 自动订阅助手 AutomaticSubscriptionAssistant | `plugins.v3/automaticsubscriptionassistant` | 1.0.0 | [Aqr-K/MoviePilot-Plugins](https://github.com/Aqr-K/MoviePilot-Plugins) v0.2.13 | V3 专用重实现（SDK + 统一媒体身份），见 [插件 README](plugins.v3/automaticsubscriptionassistant/README.md) |
 
 > 各插件目录内的 `README.md` 与 `package.v2.json` / `package.v3.json` 中的 `upstream` 字段
