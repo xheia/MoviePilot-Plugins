@@ -27,10 +27,6 @@ DEFAULT_SUBSCRIBE_WORKERS = 2
 #: 订阅并发数上限（再高对接口方与宿主都是压力）
 MAX_SUBSCRIBE_WORKERS = 8
 
-#: bitmagnet 单次检索返回的种子条数上限（超过 100 对自建实例压力偏大）
-DEFAULT_BITMAGNET_LIMIT = 20
-MAX_BITMAGNET_LIMIT = 100
-
 
 #: 默认配置
 DEFAULTS: Dict[str, Any] = {
@@ -54,44 +50,25 @@ DEFAULTS: Dict[str, Any] = {
     "wy_daily_song": False,
     # QQ 音乐
     "qqmusic_paths": "",
-    # 搜索与下载
-    "search_enabled": False,
-    "download_enabled": False,
-    "download_path": "",
-    "download_format": "flac",
-    "download_client": "auto",
-    # Spotify 凭据（Web API client credentials）
+    # Spotify 凭据（Web API client credentials，仅 Spotify 歌单需要）
     "spotify_client_id": "",
     "spotify_client_secret": "",
     # 其它平台歌单（酷狗 / 酷我 / 咪咕 / Spotify …）：每行 platform|标识符|播放列表名[:用户]
     "other_paths": "",
-    # bitmagnet（自建 BT 索引器，GraphQL 接口）：用于无直链时检索种子下载
-    "bitmagnet_enabled": False,
-    "bitmagnet_url": "",
-    "bitmagnet_api_key": "",
-    "bitmagnet_limit": DEFAULT_BITMAGNET_LIMIT,
 }
 
 #: 布尔配置项
 _BOOL_KEYS = ("enabled", "exact_match", "wy_daily_list", "wy_daily_song",
-              "search_enabled", "download_enabled", "bitmagnet_enabled",
               "immediate_search", "library_index")
 #: 字符串配置项
 _STR_KEYS = (
     "cron", "ncm_api_url", "wymusic_paths", "qqmusic_paths",
-    "subscribe_user", "download_path", "download_format", "download_client",
-    "spotify_client_id", "spotify_client_secret", "other_paths",
-    "bitmagnet_url", "bitmagnet_api_key",
+    "subscribe_user", "spotify_client_id", "spotify_client_secret", "other_paths",
 )
 #: 整数配置项（收敛到 [下限, 上限]，非法值回退默认）
 _INT_KEYS: Dict[str, Tuple[int, int]] = {
     "subscribe_workers": (1, MAX_SUBSCRIBE_WORKERS),
 }
-
-#: 允许的下载格式（默认 flac）
-_DOWNLOAD_FORMATS = ("flac", "mp3", "m4a", "wav", "ogg")
-#: 允许的下载客户端（auto 表示交给宿主按已配置客户端选择）
-_DOWNLOAD_CLIENTS = ("auto", "qbittorrent", "transmission")
 
 
 def defaults() -> Dict[str, Any]:
@@ -115,20 +92,6 @@ def normalize(config: Dict[str, Any] = None) -> Dict[str, Any]:
             data[key] = str(value).strip()
     # ncm-api 地址统一去掉尾部斜杠，避免出现 "http://host:1630//xxx" 这种双斜杠请求
     data["ncm_api_url"] = (data["ncm_api_url"] or "").rstrip("/")
-    # 下载格式收敛到白名单，非法值回退到 flac
-    if data.get("download_format") not in _DOWNLOAD_FORMATS:
-        data["download_format"] = "flac"
-    # 下载客户端收敛到白名单，非法值回退到 auto
-    if data.get("download_client") not in _DOWNLOAD_CLIENTS:
-        data["download_client"] = "auto"
-    # bitmagnet 地址去掉尾部斜杠（GraphQL 端点固定为 /graphql）
-    data["bitmagnet_url"] = (data["bitmagnet_url"] or "").rstrip("/")
-    # bitmagnet 结果条数收敛到 1..100 的整数（缺省 / 非法值回退到默认）
-    try:
-        limit = int(raw.get("bitmagnet_limit", DEFAULT_BITMAGNET_LIMIT))
-    except (TypeError, ValueError):
-        limit = DEFAULT_BITMAGNET_LIMIT
-    data["bitmagnet_limit"] = max(1, min(MAX_BITMAGNET_LIMIT, limit))
     # 整数配置项收敛到上下限之间（超上限收敛到上限，低于下限收敛到下限）
     for key, (low, high) in _INT_KEYS.items():
         try:

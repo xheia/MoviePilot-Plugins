@@ -24,7 +24,6 @@ export default defineConfig(({ command }) => ({
       exposes: {
         './Page': './src/components/Page.vue',
         './Config': './src/components/Config.vue',
-        './Search': './src/components/Search.vue',
       },
       shared: {
         vue: {

@@ -33,7 +33,6 @@
       <v-tab value="run">运行设置</v-tab>
       <v-tab value="netease">网易云</v-tab>
       <v-tab value="sources">歌单来源</v-tab>
-      <v-tab value="searchdl">搜索与下载</v-tab>
       <v-tab value="result">上次同步</v-tab>
     </v-tabs>
 
@@ -165,70 +164,14 @@
               placeholder="每行一条：歌单ID:播放列表名称[:emby用户名]" />
           </section>
 
-        </template>
-
-        <!-- 搜索与下载 -->
-        <template v-else-if="tab === 'searchdl'">
-          <section class="ms-section">
-            <h3 class="ms-section__title">搜索</h3>
-            <v-switch v-model="form.search_enabled" color="primary" inset>
-              <template #label><span class="ms-label">开启跨平台搜索</span></template>
-            </v-switch>
-            <p class="ms-hint">开启后，数据页的「搜索下载」视图可按关键词跨平台搜索
-              （网易云 / QQ / Spotify / 酷狗 / 酷我 / 咪咕）。</p>
-          </section>
-
           <v-divider />
 
           <section class="ms-section">
-            <h3 class="ms-section__title">下载</h3>
-            <v-switch v-model="form.download_enabled" color="primary" inset>
-              <template #label><span class="ms-label">开启下载</span></template>
-            </v-switch>
-            <v-text-field v-model="form.download_path" label="下载路径" class="ms-row__grow"
-              placeholder="/media/music（直链下载落盘到此目录）" />
-            <div class="ms-row">
-              <v-select v-model="form.download_format" :items="downloadFormats" label="默认格式"
-                class="ms-row__grow" />
-              <v-select v-model="form.download_client" :items="downloadClients" label="下载客户端"
-                class="ms-row__grow"
-                hint="auto 交给宿主按已配置客户端挑；否则固定推送到 qBittorrent / transmission"
-                persistent-hint />
-            </div>
-            <p class="ms-hint">真实下载目前仅「网易云」支持：经你自部署的 ncm-api 取音频直链后按上面的
-              路径 / 格式落盘；其余平台未开放直链时，若配置了下面的 bitmagnet，会自动改用种子检索并
-              推送到上面的下载客户端。插件不解密音频、不绕过付费 / 会员限制，
-              付费内容请通过平台官方渠道获取。</p>
-          </section>
-
-          <v-divider />
-
-          <section class="ms-section">
-            <h3 class="ms-section__title">bitmagnet（自建 BT 索引器）</h3>
-            <v-switch v-model="form.bitmagnet_enabled" color="primary" inset>
-              <template #label><span class="ms-label">平台无直链时回退到 bitmagnet 检索种子</span></template>
-            </v-switch>
-            <div class="ms-row">
-              <v-text-field v-model="form.bitmagnet_url" label="服务地址" class="ms-row__grow"
-                placeholder="http://192.168.1.100:3333" />
-              <v-btn variant="tonal" color="primary" :loading="bmTesting" @click="testBitmagnet">
-                测试连接
-              </v-btn>
-            </div>
-            <div class="ms-row">
-              <v-text-field v-model="form.bitmagnet_api_key" label="API Key（可留空）"
-                class="ms-row__grow" type="password"
-                placeholder="实例前面挂了反代需要鉴权时才填" />
-              <v-text-field v-model.number="form.bitmagnet_limit" label="检索条数"
-                class="ms-row__grow" type="number" hint="1 ~ 100，默认 20" persistent-hint />
-            </div>
-            <v-alert v-if="bmMessage" density="compact" class="mt-2" :type="bmOk ? 'success' : 'error'"
-              variant="tonal">{{ bmMessage }}</v-alert>
-            <p class="ms-hint">bitmagnet 自带 GraphQL 接口，插件固定调用 <code>/graphql</code>，
-              这里只需填基础地址（不要带 <code>/graphql</code>）。没有直链时插件会拿
-              「歌手 + 歌名」去你自己的实例检索种子，再把磁力推送到上面的下载客户端。
-              bitmagnet 默认不鉴权，<code>API Key</code> 会以 <code>X-API-Key</code>
-              请求头发送，用于反代鉴权的场景。</p>
+            <h3 class="ms-section__title">其它平台歌单</h3>
+            <v-textarea v-model="form.other_paths" rows="4" auto-grow label="歌单同步设置"
+              placeholder="每行一条：平台|标识符|播放列表名称[:emby用户名]&#10;例：spotify|https://open.spotify.com/playlist/xxx|每日推荐&#10;kugou|12345|华语精选" />
+            <p class="ms-hint">用 <code>|</code> 分隔（因为标识符可能是 URL）。支持的标识：
+              <code>spotify</code> / <code>kugou</code> / <code>kuwo</code> / <code>migu</code>。</p>
           </section>
 
           <v-divider />
@@ -241,18 +184,8 @@
               <v-text-field v-model="form.spotify_client_secret" label="Client Secret"
                 class="ms-row__grow" type="password" placeholder="Client Secret" />
             </div>
-            <p class="ms-hint">仅 Spotify 搜索 / 歌单需要。在
+            <p class="ms-hint">仅 Spotify 歌单需要。在
               <code>https://developer.spotify.com/dashboard</code> 创建 App 后取用。</p>
-          </section>
-
-          <v-divider />
-
-          <section class="ms-section">
-            <h3 class="ms-section__title">其它平台歌单</h3>
-            <v-textarea v-model="form.other_paths" rows="4" auto-grow label="歌单同步设置"
-              placeholder="每行一条：平台|标识符|播放列表名称[:emby用户名]&#10;例：spotify|https://open.spotify.com/playlist/xxx|每日推荐&#10;kugou|12345|华语精选" />
-            <p class="ms-hint">用 <code>|</code> 分隔（因为标识符可能是 URL）。支持的标识：
-              <code>spotify</code> / <code>kugou</code> / <code>kuwo</code> / <code>migu</code>。</p>
           </section>
 
           <v-divider />
@@ -373,26 +306,10 @@ const DEFAULTS = {
   wy_daily_list: false,
   wy_daily_song: false,
   qqmusic_paths: '',
-  search_enabled: false,
-  download_enabled: false,
-  download_path: '',
-  download_format: 'flac',
-  download_client: 'auto',
   spotify_client_id: '',
   spotify_client_secret: '',
   other_paths: '',
-  bitmagnet_enabled: false,
-  bitmagnet_url: '',
-  bitmagnet_api_key: '',
-  bitmagnet_limit: 20,
 }
-
-const downloadFormats = ['flac', 'mp3', 'm4a', 'wav', 'ogg']
-const downloadClients = [
-  { title: '自动（宿主按已配置客户端挑）', value: 'auto' },
-  { title: 'qBittorrent', value: 'qbittorrent' },
-  { title: 'Transmission', value: 'transmission' },
-]
 
 const tab = ref('run')
 const loading = ref(true)
@@ -422,28 +339,6 @@ const probeResult = ref(null)
 const probing = ref(false)
 const logouting = ref(false)
 const running = ref(false)
-
-const bmTesting = ref(false)
-const bmMessage = ref('')
-const bmOk = ref(false)
-
-async function testBitmagnet() {
-  bmTesting.value = true
-  bmMessage.value = ''
-  try {
-    const res = await call('post', `${PLUGIN}/bitmagnet/test`, {
-      url: form.bitmagnet_url,
-      api_key: form.bitmagnet_api_key,
-    })
-    bmOk.value = res?.code === 0
-    bmMessage.value = res?.message || (res?.code === 0 ? '已连通' : '连接失败')
-  } catch (e) {
-    bmOk.value = false
-    bmMessage.value = '测试失败：' + (e?.message || e)
-  } finally {
-    bmTesting.value = false
-  }
-}
 
 const addedTotal = computed(() =>
   (stats.value.playlists || []).reduce((sum, p) => sum + (p.added || 0), 0))
@@ -592,15 +487,43 @@ async function logout() {
   }
 }
 
+// 运行一次后轮询 /status：本轮同步要跨多个歌单与服务器，轮询让「同步进行中」
+// 状态与同步统计持续保鲜，跑完自动收起
+let runPollTimer = null
+let runPollSeen = false
+function stopRunPoll() {
+  if (runPollTimer) {
+    clearInterval(runPollTimer)
+    runPollTimer = null
+  }
+}
+
 async function runOnce() {
   running.value = true
+  stopRunPoll()
+  runPollSeen = false
   try {
     const res = await call('post', `${PLUGIN}/run`)
     error.value = res?.code === 0 ? '' : (res?.message || '触发失败')
-    if (res?.code === 0) await Promise.resolve(setTimeout(refreshStats, 3500))
+    if (res?.code === 0) {
+      let rounds = 0
+      runPollTimer = setInterval(async () => {
+        rounds += 1
+        try {
+          await refreshStats()
+        } catch { /* 单次刷新失败继续轮询 */ }
+        if (running.value) runPollSeen = true
+        // 见过 running=true 后又转 false，或超过 10 分钟仍未结束，停止轮询
+        if ((runPollSeen && !running.value) || rounds >= 200) {
+          stopRunPoll()
+          running.value = false
+        }
+      }, 3000)
+    } else {
+      running.value = false
+    }
   } catch (e) {
     error.value = '触发同步失败：' + (e?.message || e)
-  } finally {
     running.value = false
   }
 }
@@ -615,7 +538,7 @@ async function refreshStats() {
 }
 
 onMounted(loadStatus)
-onUnmounted(stopQrPoll)
+onUnmounted(() => { stopQrPoll(); stopRunPoll() })
 </script>
 
 <style scoped>

@@ -206,7 +206,11 @@ class EmbyMusic(Emby):
     # ------------------------------------------------------------------
 
     def search(self, track: Track, exact_match: bool = True) -> Tuple[List[str], List[str]]:
-        """在库中搜索一首歌，返回 ``(id 列表, 名称列表)``（最多各一条）。"""
+        """在库中搜索一首歌，返回 ``(id 列表, 名称列表)``（最多各一条）。
+
+        匹配规则（v2.5.0 起）：歌名命中后，「歌名 + 专辑名」或「歌名 + 歌手」
+        命中即算匹配——专辑命中优先；关闭精确匹配时只按歌名匹配。
+        """
         if not track.title:
             return [], []
         url = (f"{self._host}emby/Users/{self.user}/Items"
@@ -219,11 +223,20 @@ class EmbyMusic(Emby):
             return [], []
         if not payload.get("TotalRecordCount"):
             return [], []
-        items = payload.get("Items") or []
+        audios = [item for item in (payload.get("Items") or [])
+                  if item.get("Type") == "Audio"]
+        if not audios:
+            return [], []
         if exact_match:
-            items = [item for item in items if self._match_artist(item, track.artists)]
-        audios = [item for item in items if item.get("Type") == "Audio"][:1]
-        return [item.get("Id") for item in audios], [item.get("Name") for item in audios]
+            album_hit = [item for item in audios
+                         if track.album and self._match_album(item, track.album)]
+            artist_hit = [item for item in audios
+                          if track.artists and self._match_artist(item, track.artists)]
+            audios = album_hit or artist_hit
+            if not audios:
+                return [], []
+        item = audios[0]
+        return [item.get("Id")], [item.get("Name")]
 
     @staticmethod
     def _match_artist(item: Dict[str, Any], artists: List[str]) -> bool:
@@ -235,6 +248,48 @@ class EmbyMusic(Emby):
             return True
         joined = " ".join(names)
         return any(artist and artist in joined for artist in artists)
+
+    @staticmethod
+    def _match_album(item: Dict[str, Any], album: str) -> bool:
+        """判断条目所属专辑是否命中目标专辑。"""
+        if not album:
+            return False
+        name = str(item.get("Album") or "").strip()
+        if not name:
+            return False
+        return album == name or album in name or name in album
+
+    # ------------------------------------------------------------------
+    # 播放列表总览（概览）
+    # ------------------------------------------------------------------
+
+    def update_summary(self, playlist_title: str, summary: str) -> bool:
+        """回写播放列表的总览（Emby 播放列表详情里的「概览」一栏）。
+
+        尽力而为：Emby 的元数据编辑接口各版本略有差异，写失败只记日志，
+        不影响歌单同步结果。播放列表不存在时返回 False。
+        """
+        if not playlist_title or not (summary or "").strip():
+            return False
+        try:
+            playlist_id, _, _ = self.playlist_items(playlist_title)
+        except Exception as error:  # noqa: BLE001
+            logger.info(f"Emby读取播放列表[{playlist_title}]失败，无法更新总览：{error}")
+            return False
+        if not playlist_id:
+            return False
+        url = f"{self._host}emby/Items/{playlist_id}?api_key={self._apikey}"
+        try:
+            response = self.post_data(
+                url, json={"Id": playlist_id, "Overview": summary},
+                headers={"Content-Type": "application/json"})
+            ok = response is not None and getattr(response, "status_code", 0) in (200, 204)
+            if not ok:
+                logger.info(f"Emby更新播放列表[{playlist_title}]总览未成功（已忽略）")
+            return ok
+        except Exception as error:  # noqa: BLE001 - 总览写失败不影响同步
+            logger.info(f"Emby更新播放列表[{playlist_title}]总览失败：{error}")
+            return False
 
     # ------------------------------------------------------------------
     # 曲库索引（一轮一次全库拉取，替代逐歌检索）

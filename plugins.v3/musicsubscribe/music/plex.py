@@ -149,6 +149,57 @@ class PlexMusic(Plex):
             logger.error(f"Plex向播放列表[{playlist_title}]追加歌曲失败：{error}")
 
     # ------------------------------------------------------------------
+    # 播放列表总览（摘要）
+    # ------------------------------------------------------------------
+
+    def update_summary(self, playlist_title: str, summary: str) -> bool:
+        """回写播放列表的总览（Plex 播放列表编辑弹窗里的「总览」一栏）。
+
+        同步时把来源、同步时间与曲目统计写进去：之后在 Plex 里点开播放列表，
+        就能看到这份歌单是从哪来、什么时候同步的，不用再回插件里翻。
+        播放列表不存在（本轮一首都没匹配上）时返回 False，不做无谓请求。
+        """
+        if not playlist_title or not (summary or "").strip():
+            return False
+        # 不预查 music_playlists：那是 load() 时的旧快照，本轮新建的播放列表
+        # 还不在里面；直接取，取不到（不存在）再由异常分支挡掉
+        try:
+            playlist = self.server.playlist(playlist_title)
+        except Exception as error:  # noqa: BLE001
+            logger.info(f"Plex播放列表[{playlist_title}]不存在，跳过总览回写：{error}")
+            return False
+        try:
+            # plexapi 的播放列表编辑入口（PUT /playlists/{id}?summary=...）
+            playlist._edit(summary=summary)
+            return True
+        except Exception as error:  # noqa: BLE001 - 老版本 plexapi 没有该方法时走裸 HTTP
+            logger.info(f"Plex经 plexapi 更新总览失败，改用直连接口：{error}")
+        return self._put_summary(playlist, summary)
+
+    def _put_summary(self, playlist: Any, summary: str) -> bool:
+        """兜底：按 Plex REST 约定直连写总览（参考官方接口与历史脚本）。"""
+        key = getattr(playlist, "key", "") or ""
+        if not key or not self._host or not self._token:
+            return False
+        try:
+            import requests
+            url = f"{self._host.rstrip('/')}{key}"
+            response = requests.put(
+                url, params={"summary": summary},
+                headers={"X-Plex-Token": self._token, "Accept": "application/json"},
+                timeout=15,
+            )
+            ok = response is not None and response.status_code in (200, 201)
+            if not ok:
+                logger.warning(
+                    f"Plex更新播放列表总览失败：HTTP "
+                    f"{getattr(response, 'status_code', '无响应')}")
+            return ok
+        except Exception as error:  # noqa: BLE001 - 总览写失败不影响歌单同步结果
+            logger.warning(f"Plex更新播放列表总览失败：{error}")
+            return False
+
+    # ------------------------------------------------------------------
     # 曲库索引（一轮一次全库拉取，替代逐歌检索）
     # ------------------------------------------------------------------
 
@@ -212,22 +263,27 @@ class PlexMusic(Plex):
     # ------------------------------------------------------------------
 
     def search(self, track: Track, exact_match: bool = True) -> List[Any]:
-        """在音乐库里检索一首歌，返回 0 或 1 条音频条目。"""
+        """在音乐库里检索一首歌，返回 0 或 1 条音频条目。
+
+        匹配规则（v2.5.0 起）：歌名命中后，「歌名 + 专辑名」或「歌名 + 歌手」
+        命中即算匹配——专辑命中优先，同组多个版本取码率最高的；
+        关闭精确匹配时只按歌名匹配。
+        """
         if not track.title:
             return []
         candidates = self._search_tracks(track.title)
         if not candidates:
             return []
-        if exact_match and track.artists:
-            matched = [item for item in candidates if self._match_artist(item, track.artists)]
-            if not matched:
-                return []
-            candidates = matched
-        # 同名曲目常属于不同专辑，能拿到专辑名时优先取同专辑的版本
-        if track.album:
-            same_album = [item for item in candidates if self._match_album(item, track.album)]
-            candidates = same_album or candidates
-        return [self._best_bitrate(candidates)]
+        if not exact_match:
+            return [self._best_bitrate(candidates)]
+        album_hit = [item for item in candidates
+                     if track.album and self._match_album(item, track.album)]
+        artist_hit = [item for item in candidates
+                      if track.artists and self._match_artist(item, track.artists)]
+        accepted = album_hit or artist_hit
+        if not accepted:
+            return []
+        return [self._best_bitrate(accepted)]
 
     def _search_tracks(self, title: str) -> List[Any]:
         """按曲名在音乐媒体库里检索。"""

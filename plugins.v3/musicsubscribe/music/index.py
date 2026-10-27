@@ -8,8 +8,8 @@
   Emby 走 ``/Items`` 分页；
 - 上限：索引条数超过 :data:`INDEX_LIMIT` 时只保留与待匹配曲目相关的条目，
   避免超大库把内存吃满；
-- 语义：与原来的逐歌检索保持一致（歌名互相包含 → 歌手命中 → 同专辑优先 →
-  码率最高），换索引不换判定结果。
+- 语义（v2.5.0 起）：歌名命中后，「歌名 + 专辑名」或「歌名 + 歌手」命中即算匹配，
+  专辑命中优先，同曲多版本取码率最高。
 """
 
 from __future__ import annotations
@@ -119,9 +119,9 @@ class LibraryIndex:
     def match(self, track: Track, exact_match: bool = True) -> Optional[IndexEntry]:
         """在索引里找一首歌；找不到返回 ``None``。
 
-        匹配语义与原来的逐歌检索保持一致：歌名必须对得上（相等或互相包含），
-        开启精确匹配时歌手也要命中，能拿到专辑名时优先同专辑版本，
-        同曲多版本取码率最高的。
+        匹配规则（v2.5.0 起）：歌名命中（相等或互相包含）的前提下，
+        **「歌名 + 专辑名」或「歌名 + 歌手」命中即算匹配**——专辑命中优先，
+        同组多个版本取码率最高的；关闭精确匹配时只按歌名匹配。
         """
         if not track or not track.title:
             return None
@@ -134,19 +134,22 @@ class LibraryIndex:
                 candidates.extend(items)
         if not candidates:
             return None
-        if exact_match and track.artists:
-            matched = [item for item in candidates
-                       if self._match_artist(item.artists, track.artists)]
-            if not matched:
-                return None
-            candidates = matched
-        if track.album:
-            same_album = [item for item in candidates
-                          if same_or_contains(track.album, item.album)]
-            candidates = same_album or candidates
-        if len(candidates) > 1:
-            return max(candidates, key=lambda item: item.bitrate)
-        return candidates[0]
+        if not exact_match:
+            return self._best(candidates)
+        # 歌曲 + 专辑名 / 歌曲 + 歌手：任一命中即算，专辑优先
+        album_hit = [item for item in candidates
+                     if track.album and same_or_contains(track.album, item.album)]
+        artist_hit = [item for item in candidates
+                      if track.artists and self._match_artist(item.artists, track.artists)]
+        accepted = album_hit or artist_hit
+        if not accepted:
+            return None
+        return self._best(accepted)
+
+    @staticmethod
+    def _best(candidates: List[IndexEntry]) -> IndexEntry:
+        """候选条目里取码率最高的一条。"""
+        return max(candidates, key=lambda item: item.bitrate)
 
     @staticmethod
     def _match_artist(entry_artists: List[str], wanted: List[str]) -> bool:

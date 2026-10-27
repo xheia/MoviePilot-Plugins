@@ -73,6 +73,7 @@
     <!-- 工具条 -->
     <div class="ms-toolbar">
       <div v-if="view === 'pending'" class="ms-toolbar__group">
+        <v-btn size="small" variant="tonal" @click="selectCurrentPage">选择当前页</v-btn>
         <v-btn size="small" variant="tonal" @click="selectAll('song')">全选</v-btn>
         <v-btn size="small" variant="tonal" @click="invert">
           反选
@@ -209,6 +210,11 @@
     <footer v-if="view === 'pending'" class="ms-foot">
       <span class="ms-foot__count">已勾选 {{ pickedCount }} 条（歌曲 {{ countByTarget.song }} / 专辑
         {{ countByTarget.album }}）</span>
+      <v-select v-model="batchSize" :items="batchSizes" class="ms-foot__batch" density="compact"
+        variant="outlined" hide-details label="每批" />
+      <span v-if="batchProgress" class="ms-foot__count">
+        第 {{ batchProgress.done }} / {{ batchProgress.total }} 批（本批 {{ batchProgress.size }} 条）
+      </span>
       <v-spacer />
       <v-menu location="top">
         <template #activator="{ props: menuProps }">
@@ -221,6 +227,8 @@
       </v-menu>
       <v-btn variant="tonal" color="warning" prepend-icon="mdi-delete-outline" :disabled="!pickedCount"
         :loading="removing" @click="removePicked">移除</v-btn>
+      <v-btn v-if="subscribing" variant="tonal" color="error" prepend-icon="mdi-stop-circle-outline"
+        @click="stopBatch">停止</v-btn>
       <v-btn color="primary" variant="flat" prepend-icon="mdi-bell-plus-outline" :disabled="!pickedCount"
         :loading="subscribing" @click="subscribePicked">订阅</v-btn>
     </footer>
@@ -235,7 +243,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -272,6 +280,12 @@ const keyword = ref('')
 const sourceFilter = ref(null)
 const page = ref(1)
 const pageSize = ref(20)
+
+// 分批订阅：每批条数与执行进度（批间会刷新总览，进度即时可见）
+const batchSizes = [10, 20, 50, 100]
+const batchSize = ref(20)
+const batchProgress = ref(null)
+const batchAbort = ref(false)
 
 // seq -> 'song' | 'album'
 const picks = reactive({})
@@ -366,12 +380,32 @@ async function load() {
     const alive = new Set(items.value.map(i => Number(i.seq)))
     Object.keys(picks).forEach(seq => { if (!alive.has(Number(seq))) delete picks[seq] })
     if (page.value > pageCount.value) page.value = pageCount.value
+    // 同步进行中：按节奏轮询，让歌单总览随「更新歌单」实时刷新
+    if (running.value && !subscribing.value) startPolling()
+    else stopPolling()
   } catch (e) {
     error.value = '加载缺失清单失败：' + (e?.message || e)
     items.value = []
+    stopPolling()
   } finally {
     loading.value = false
     emit('action')
+  }
+}
+
+// 同步中轮询（约 5 秒一次）：一轮同步要按歌单逐个推进，轮询让总览与清单持续保鲜
+let pollTimer = null
+function startPolling() {
+  if (pollTimer) return
+  pollTimer = setInterval(() => {
+    if (subscribing.value) return
+    load().catch(() => stopPolling())
+  }, 5000)
+}
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
   }
 }
 
@@ -432,6 +466,11 @@ function selectAll() {
   pendingRows.value.forEach(row => { picks[Number(row.seq)] = 'song' })
 }
 
+// 选择当前页：只勾选当前这一页显示的行（歌单粒度按歌曲）
+function selectCurrentPage() {
+  pagedRows.value.forEach(row => { picks[Number(row.seq)] = 'song' })
+}
+
 function invert() {
   pendingRows.value.forEach(row => {
     const seq = Number(row.seq)
@@ -455,38 +494,73 @@ function linkEntries(links) {
   ]
 }
 
+// 停止分批订阅：当前批执行完后中断，剩余勾选保留以便续订
+function stopBatch() {
+  batchAbort.value = true
+}
+
 async function subscribePicked() {
   const payload = Object.keys(picks)
     .map(seq => ({ seq: Number(seq), target: picks[seq] }))
     .filter(i => i.target)
   if (!payload.length) return
+  // 按「每批 N 条」切批：批间刷新清单与总览，进度即时可见，可中途停止
+  const size = Math.max(1, Number(batchSize.value) || 20)
+  const batches = []
+  for (let i = 0; i < payload.length; i += size) batches.push(payload.slice(i, i + size))
   subscribing.value = true
+  batchAbort.value = false
   error.value = ''
   result.value = ''
+  let okCount = 0
+  let failCount = 0
+  let queued = 0
+  let doneBatches = 0
+  const failedTitles = []
   try {
-    const res = await call('post', `${PLUGIN}/pending/subscribe`, { items: payload })
-    if (res?.code === 0) {
-      const failed = (res.results || []).filter(r => !r.ok)
-      const detail = failed.map(f => `${f.title}（${f.message}）`).slice(0, 3).join('；')
-      resultLevel.value = failed.length ? 'warning' : 'success'
-      result.value = failed.length
-        ? `订阅完成：${payload.length - failed.length} 条订阅成功（可在「订阅历史」里查看），${failed.length} 条失败：${detail}`
-        : (res.message || '订阅完成')
-      // 订阅成功即入宿主搜索队列（可在配置里关闭）
-      if (res.search_queued > 0) {
-        result.value += `；${res.search_queued} 个订阅已送入宿主搜索队列`
+    for (let bi = 0; bi < batches.length; bi++) {
+      doneBatches = bi + 1
+      batchProgress.value = { done: doneBatches, total: batches.length, size: batches[bi].length }
+      try {
+        const res = await call('post', `${PLUGIN}/pending/subscribe`, { items: batches[bi] })
+        if (res?.code === 0) {
+          const failed = (res.results || []).filter(r => !r.ok)
+          okCount += batches[bi].length - failed.length
+          failCount += failed.length
+          failed.forEach(f => failedTitles.push(`${f.title}（${f.message}）`))
+          queued += Number(res.search_queued) || 0
+        } else {
+          failCount += batches[bi].length
+          failedTitles.push(`第 ${doneBatches} 批：${res?.message || '订阅失败'}`)
+        }
+      } catch (e) {
+        failCount += batches[bi].length
+        failedTitles.push(`第 ${doneBatches} 批：${e?.message || e}`)
       }
-      clearPick()
-      await load()
-    } else {
-      resultLevel.value = 'error'
-      result.value = res?.message || '订阅失败'
+      // 批间刷新：订阅成功的条目移出清单，总览与勾选状态随之更新
+      try { await load() } catch (_) { /* 刷新失败不影响后续批次 */ }
+      if (batchAbort.value) break
     }
+    const detail = failedTitles.slice(0, 3).join('；')
+    resultLevel.value = failCount ? 'warning' : 'success'
+    if (batchAbort.value) {
+      const sent = batches.slice(0, doneBatches).reduce((n, b) => n + b.length, 0)
+      const left = payload.length - sent
+      result.value = `已停止（完成 ${doneBatches}/${batches.length} 批）：成功 ${okCount} 条，失败 ${failCount} 条，剩余 ${left} 条未订阅（勾选已保留，可再点「订阅」继续）`
+    } else if (failCount) {
+      result.value = `订阅完成：${okCount} 条订阅成功（可在「订阅历史」里查看），${failCount} 条失败：${detail}`
+    } else {
+      result.value = `订阅完成：${okCount} 条订阅成功（可在「订阅历史」里查看）`
+    }
+    if (queued > 0) result.value += `；${queued} 个订阅已送入宿主搜索队列`
+    if (!batchAbort.value) clearPick()
   } catch (e) {
     resultLevel.value = 'error'
     result.value = '订阅失败：' + (e?.message || e)
   } finally {
+    batchProgress.value = null
     subscribing.value = false
+    batchAbort.value = false
   }
 }
 
@@ -535,6 +609,7 @@ watch([scope, keyword, sourceFilter, targetFilter, pageSize], () => { page.value
 watch(scope, load)
 
 onMounted(load)
+onUnmounted(stopPolling)
 </script>
 
 <style scoped>

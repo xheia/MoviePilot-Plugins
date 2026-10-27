@@ -3,7 +3,8 @@
 只做两件事：
 
 1. **同步 / 创建歌单** —— 把网易云、QQ 音乐的歌单（以及网易云每日推荐）
-   同步成 Plex / Emby 的音乐库播放列表，库里已有的曲目不重复添加；
+   同步成 Plex / Emby 的音乐库播放列表，库里已有的曲目不重复添加，
+   并把播放列表的**总览**（摘要）一并写成来源、同步时间与曲目统计；
 2. **库内缺失歌曲订阅** —— 同步时媒体库里搜不到的曲目汇总成一份待订阅清单
    （含时长、歌手、专辑），在插件数据页逐行勾选「歌曲」或「专辑」后一次性推送订阅。
 
@@ -14,6 +15,9 @@
 （跨服务器复用，单个歌单读取失败沿用上次快照）；按服务器建一份曲库索引，
 逐曲匹配不再请求媒体库；同步用非阻塞锁互斥；订阅走有界并行 + 失败退避，
 成功后即入宿主原生搜索队列；分段耗时与索引指标一起进数据页。
+
+**v2.5.0 起**：曲库匹配改为「歌名 + 专辑」或「歌名 + 歌手」命中即算；
+歌单总览随同步回写；数据页支持选择当前页与分批订阅；移除了搜索 / 下载能力。
 """
 
 import threading
@@ -34,7 +38,6 @@ from app.sdk.services import ServiceConfigHelper
 
 from .config import (
     CONFIG_PREFIX,
-    DEFAULT_BITMAGNET_LIMIT,
     DEFAULT_NCM_API_URL,
     DEFAULT_SUBSCRIBE_USER,
     defaults,
@@ -43,17 +46,11 @@ from .config import (
     parse_platform_line,
     split_lines,
 )
-from .music.bitmagnet import BitmagnetClient
-from .music.download import Downloader
 from .music.emby import EmbyMusic
 from .music.index import LibraryIndex
 from .music.netease import NeteaseClient, NeteaseError
 from .music.plex import PlexMusic
-from .music.platform import (
-    DEFAULT_SEARCH_PLATFORMS, PlatformError, available_platforms,
-    get_platform, list_platforms,
-)
-from .music.smartlist import SmartListGenerator, build_seed
+from .music.platform import get_platform, list_platforms
 from .music.qqmusic import QQMusicClient
 from .music.subscribe import (
     MUSIC_TYPES, TARGET_ALBUM, TARGET_SONG, MusicSubscriber,
@@ -98,7 +95,7 @@ class MusicSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "music.png"
     # 插件版本
-    plugin_version = "2.4.0"
+    plugin_version = "2.5.0"
     # 插件作者
     plugin_author = "xheia"
     # 作者主页
@@ -129,20 +126,8 @@ class MusicSubscribe(_PluginBase):
     _qqmusic_paths = ""
     _wy_daily_list = False
     _wy_daily_song = False
-    #: 搜索与下载
-    _search_enabled = False
-    _download_enabled = False
-    _download_path = ""
-    _download_format = "flac"
-    _download_client = "auto"
-    _spotify_client_id = ""
-    _spotify_client_secret = ""
+    #: 其它平台歌单（Spotify 凭据等经 self._config 直达平台适配器）
     _other_paths = ""
-    #: bitmagnet（自建 BT 索引器）
-    _bitmagnet_enabled = False
-    _bitmagnet_url = ""
-    _bitmagnet_api_key = ""
-    _bitmagnet_limit = DEFAULT_BITMAGNET_LIMIT
 
     # 运行时
     _scheduler: Optional[BackgroundScheduler] = None
@@ -187,18 +172,7 @@ class MusicSubscribe(_PluginBase):
         self._qqmusic_paths = cfg["qqmusic_paths"]
         self._wy_daily_list = cfg["wy_daily_list"]
         self._wy_daily_song = cfg["wy_daily_song"]
-        self._search_enabled = cfg["search_enabled"]
-        self._download_enabled = cfg["download_enabled"]
-        self._download_path = cfg["download_path"]
-        self._download_format = cfg["download_format"]
-        self._download_client = cfg["download_client"]
-        self._spotify_client_id = cfg["spotify_client_id"]
-        self._spotify_client_secret = cfg["spotify_client_secret"]
         self._other_paths = cfg["other_paths"]
-        self._bitmagnet_enabled = cfg["bitmagnet_enabled"]
-        self._bitmagnet_url = cfg["bitmagnet_url"]
-        self._bitmagnet_api_key = cfg["bitmagnet_api_key"]
-        self._bitmagnet_limit = cfg["bitmagnet_limit"]
 
         # 每次载入配置都换一份新的运行时对象，避免旧缓存跨配置复用
         self.netease = NeteaseClient(base_url=self._ncm_api_url, data_path=self.get_data_path())
@@ -308,16 +282,7 @@ class MusicSubscribe(_PluginBase):
             {"path": "/history/clear", "endpoint": self.api_history_clear,
              "methods": ["POST"], "auth": "bear", "summary": "清空订阅历史"},
             {"path": "/platforms", "endpoint": self.api_platforms, "methods": ["GET"],
-             "auth": "bear", "summary": "列出全部音乐平台及其可用状态"},
-            {"path": "/search", "endpoint": self.api_search, "methods": ["GET"],
-             "auth": "bear", "summary": "跨平台关键词搜索（聚合网易云 / QQ / Spotify / 酷狗 / 酷我 / 咪咕）"},
-            {"path": "/bitmagnet/test", "endpoint": self.api_bitmagnet_test,
-             "methods": ["POST"], "auth": "bear",
-             "summary": "探测 bitmagnet 服务连通性（可用表单里未保存的地址）"},
-            {"path": "/download", "endpoint": self.api_download, "methods": ["POST"],
-             "auth": "bear", "summary": "下载一首曲目（直链落盘或推送到 qBittorrent / transmission）"},
-            {"path": "/smartlist", "endpoint": self.api_smartlist, "methods": ["GET"],
-             "auth": "bear", "summary": "智能歌单生成（给种子曲目，跨平台/本地池按相似度生成连贯歌单）"},
+             "auth": "bear", "summary": "列出全部音乐平台及其歌单获取可用状态"},
         ]
 
     # ------------------------------------------------------------------
@@ -404,14 +369,6 @@ class MusicSubscribe(_PluginBase):
             "pending": self._store().summary(),
             "history": self._history_store().summary(),
             "platforms": list_platforms(self._config),
-            "bitmagnet": {
-                "enabled": self._bitmagnet_enabled,
-                "url": self._bitmagnet_url,
-                "configured": bool(self._bitmagnet_url),
-                "limit": self._bitmagnet_limit,
-            },
-            "search_enabled": self._search_enabled,
-            "download_enabled": self._download_enabled,
         }
 
     def api_probe(self, api_url: Optional[str] = None) -> Dict[str, Any]:
@@ -857,198 +814,12 @@ class MusicSubscribe(_PluginBase):
                 "summary": self._history_store().summary()}
 
     # ------------------------------------------------------------------
-    # 平台 / 搜索 / 下载
+    # 平台可用性
     # ------------------------------------------------------------------
 
     def api_platforms(self) -> Dict[str, Any]:
-        """列出全部平台及其可用状态（供前端渲染开关与提示）。"""
-        platforms = list_platforms(self._config)
-        return {"code": 0, "platforms": platforms,
-                "search_platforms": DEFAULT_SEARCH_PLATFORMS,
-                "search_enabled": self._search_enabled,
-                "download_enabled": self._download_enabled}
-
-    def api_search(self, keyword: str = "", platforms: str = "", limit: int = 20) -> Dict[str, Any]:
-        """跨平台关键词搜索。
-
-        query: ``keyword``（必填）、``platforms``（逗号分隔的平台标识，留空表示搜索全部
-        可用平台）、``limit``（每平台上限，默认 20）。
-        """
-        keyword = (keyword or "").strip()
-        if not keyword:
-            return {"code": 1, "message": "请填写搜索关键词"}
-        if not self._search_enabled:
-            return {"code": 1, "message": "搜索功能未开启（请在「搜索与下载」配置页打开开关）"}
-
-        if platforms and platforms.strip():
-            wanted = [p.strip().lower() for p in platforms.split(",") if p.strip()]
-        else:
-            wanted = [name for name in DEFAULT_SEARCH_PLATFORMS
-                      if name in available_platforms(self._config)]
-        # 只保留当前可用的平台，停服 / 未配置的一律跳过
-        wanted = [name for name in wanted if name in available_platforms(self._config)]
-        if not wanted:
-            return {"code": 1, "message": "没有可用的搜索平台（检查各平台配置与可用性）"}
-
-        results: List[Dict[str, Any]] = []
-        errors: Dict[str, str] = {}
-        seen: set = set()
-        for name in wanted:
-            try:
-                adapter = get_platform(name, self._config)
-                tracks = adapter.search(keyword, limit=int(limit or 20))
-            except PlatformError as error:
-                errors[name] = str(error)
-                continue
-            except Exception as error:  # noqa: BLE001 - 单平台失败不影响其它
-                errors[name] = f"搜索失败：{error}"
-                logger.warning(f"平台[{name}]搜索[{keyword}]失败：{error}")
-                continue
-            for track in tracks or []:
-                key = (track.platform, track.source_id)
-                if not track.source_id or key in seen:
-                    continue
-                seen.add(key)
-                results.append(self._track_to_search_row(track, adapter))
-        return {
-            "code": 0,
-            "keyword": keyword,
-            "count": len(results),
-            "results": results,
-            "platforms": wanted,
-            "errors": errors,
-        }
-
-    @staticmethod
-    def _track_to_search_row(track: "Track", adapter) -> Dict[str, Any]:
-        """把曲目转成搜索结果行（含来源链接与下载方式预览）。"""
-        links = adapter.links(track)
-        return {
-            "platform": track.platform,
-            "source_id": track.source_id,
-            "album_id": track.album_id,
-            "title": track.title,
-            "artist": track.artist_text,
-            "album": track.album,
-            "duration_text": track.duration_text,
-            "links": links,
-        }
-
-    def api_download(self, request: dict = None) -> Dict[str, Any]:
-        """下载一首曲目。
-
-        body: ``{"platform", "source_id", "album_id", "title", "artist", "album",
-        "content"?}``；``content`` 可选，直接给一个 magnet / 直链，覆盖平台解析结果。
-        """
-        data = request if isinstance(request, dict) else {}
-        platform = (data.get("platform") or "").strip().lower()
-        if not platform:
-            return {"code": 1, "message": "缺少平台标识"}
-        track = Track(
-            title=data.get("title") or "",
-            artists=[data["artist"]] if data.get("artist") else [],
-            album=data.get("album") or "",
-            duration=int(data.get("duration") or 0),
-            platform=platform,
-            source_id=str(data.get("source_id") or ""),
-            album_id=str(data.get("album_id") or ""),
-        )
-        content = (data.get("content") or None)
-        try:
-            result = Downloader(self._config).download(track, content=content)
-        except PlatformError as error:
-            return {"code": 1, "message": str(error)}
-        except Exception as error:  # noqa: BLE001
-            logger.error(f"下载[{track.title}]失败：{error}", exc_info=True)
-            return {"code": 1, "message": f"下载失败：{error}"}
-        return {"code": 0 if result.get("ok") else 1, **result}
-
-    def api_bitmagnet_test(self, request: dict = None) -> Dict[str, Any]:
-        """探测 bitmagnet 连通性并回读版本号。
-
-        body 可带 ``{"url", "api_key"}`` 用于保存前试连；留空则用已保存的配置。
-        """
-        data = request if isinstance(request, dict) else {}
-        client = BitmagnetClient(
-            base_url=(data.get("url") or self._bitmagnet_url or "").strip(),
-            api_key=(data.get("api_key") or self._bitmagnet_api_key or "").strip(),
-        )
-        result = client.probe()
-        if result.get("ok"):
-            return {"code": 0, "message": f"bitmagnet 已连通（版本 {result['version'] or '未知'}）",
-                    "endpoint": client.endpoint, **result}
-        return {"code": 1, "message": result.get("error") or "连接失败",
-                "endpoint": client.endpoint, **result}
-
-    # ------------------------------------------------------------------
-    # 智能歌单生成
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _record_to_track(rec: Dict[str, Any]) -> "Track":
-        """把清单 / 历史里的一条记录转成 :class:`Track`。"""
-        return Track(
-            title=rec.get("title") or "",
-            artists=[rec["artist"]] if rec.get("artist") else [],
-            album=rec.get("album") or "",
-            duration=int(rec.get("duration") or 0),
-            platform=(rec.get("platform") or rec.get("source") or "").strip().lower(),
-            source_id=str(rec.get("source_id") or ""),
-            album_id=str(rec.get("album_id") or ""),
-        )
-
-    def _gather_pool(self, keyword: str, size: int) -> List["Track"]:
-        """汇总候选池：本地已采集曲目 + 跨平台按关键词搜索。"""
-        pool: List["Track"] = []
-        try:
-            for rec in self._store().records():
-                track = self._record_to_track(rec)
-                if track.title:
-                    pool.append(track)
-            for rec in self._history_store().records():
-                track = self._record_to_track(rec)
-                if track.title:
-                    pool.append(track)
-        except Exception as error:  # noqa: BLE001 - 本地池读取失败不应阻断
-            logger.warning(f"读取本地候选池失败：{error}")
-        limit = max(5, int(size or 20) // 2)
-        for name in (n for n in DEFAULT_SEARCH_PLATFORMS
-                     if n in available_platforms(self._config)):
-            try:
-                adapter = get_platform(name, self._config)
-                pool.extend(adapter.search(keyword, limit=limit) or [])
-            except Exception as error:  # noqa: BLE001 - 单平台失败不影响其它
-                logger.warning(f"平台[{name}]为智能歌单搜索[{keyword}]失败：{error}")
-        return pool
-
-    def api_smartlist(self, platform: str = "", title: str = "", artist: str = "",
-                      album: str = "", source_id: str = "", album_id: str = "",
-                      size: int = 20, keyword: str = "") -> Dict[str, Any]:
-        """智能歌单生成。
-
-        query: ``title``（种子歌名，必填其一）、``artist`` / ``album`` / ``platform`` /
-        ``source_id`` / ``album_id``（种子的其它信息，可选）、``keyword``（候选池关键词，
-        不填则按种子歌手 / 歌名搜）、``size``（目标歌单长度，默认 20）。
-        """
-        title = (title or "").strip()
-        keyword = (keyword or "").strip()
-        if not title and not keyword:
-            return {"code": 1, "message": "请至少提供种子歌名或关键词"}
-        seed = build_seed(platform, title, artist, album, source_id, album_id)
-        # 候选池关键词：显式 keyword 优先，否则用种子歌手，再退到歌名
-        pool_keyword = keyword or seed.artist or title
-        pool = self._gather_pool(pool_keyword, int(size or 20))
-        generator = SmartListGenerator(max_per_artist=3)
-        items = generator.generate(seed, pool, size=int(size or 20))
-        rows = generator.to_rows(items)
-        return {
-            "code": 0,
-            "seed": {"title": seed.title, "artist": seed.artist_text,
-                     "album": seed.album, "platform": seed.platform},
-            "pool_size": len(pool),
-            "count": len(rows),
-            "playlist": rows,
-        }
+        """列出全部平台及其歌单获取可用状态（供配置页渲染提示）。"""
+        return {"code": 0, "platforms": list_platforms(self._config)}
 
     # ------------------------------------------------------------------
     # 同步主干
@@ -1251,35 +1022,76 @@ class MusicSubscribe(_PluginBase):
             source = snapshot.get("source") or ""
             users = snapshot.get("users") or []
             for entry in snapshot.get("items") or []:
-                playlist = snapshot.get("name") or entry.get("name") or ""
-                tracks = self._restore_tracks(entry.get("tracks"))
-                if not playlist or not tracks:
-                    reason = "歌单名为空" if not playlist else "歌单没有曲目"
-                    logger.warning(f"{source}[{label}]{reason}，跳过")
-                    stats["playlists"].append({
-                        "server": server_name, "source": source, "name": label,
-                        "status": "error", "message": reason})
-                    continue
                 try:
-                    added, missing = self._push(server, playlist, tracks, users, index)
-                except Exception as error:  # noqa: BLE001
-                    logger.error(f"{source}同步播放列表[{playlist}]失败：{error}")
-                    stats["playlists"].append({
-                        "server": server_name, "source": source, "name": playlist,
-                        "total": len(tracks), "status": "error", "message": str(error)})
-                    continue
-                if index is None:
-                    # 没走索引：每首歌一次检索（供数据页对比）
-                    metrics["library_requests"] += len(tracks)
-                self._collect_missing(source, server_name, playlist, missing)
-                stats["playlists"].append({
-                    "server": server_name, "source": source, "name": playlist,
-                    "total": len(tracks), "added": added, "missing": len(missing),
-                    "status": "stale" if snapshot.get("stale") else "ok",
-                    "message": "歌单读取失败，本次沿用上次快照" if snapshot.get("stale") else ""})
+                    self._sync_one_playlist(server, server_name, source, users,
+                                            label, snapshot, entry, index,
+                                            stats, metrics)
+                finally:
+                    # 更新歌单时更新歌单总览：每处理完一个歌单立即落盘统计，
+                    # 长轮同步中途被打断也不丢已完成部分的进度
+                    stats["missing"] = len(self._round_missing)
+                    self.save_data(SYNC_STATS_KEY, stats)
         metrics["push_seconds"] = round(
             (metrics.get("push_seconds") or 0.0) + (time.time() - mark), 2)
         logger.info(f"媒体服务器[{server_name}]歌单同步完成")
+
+    def _sync_one_playlist(self, server: Any, server_name: str, source: str,
+                           users: List[str], label: str, snapshot: Dict[str, Any],
+                           entry: Dict[str, Any], index: Optional[LibraryIndex],
+                           stats: Dict[str, Any], metrics: Dict[str, Any]) -> None:
+        """推送一个歌单并记账（含播放列表总览回写）。"""
+        playlist = snapshot.get("name") or entry.get("name") or ""
+        tracks = self._restore_tracks(entry.get("tracks"))
+        if not playlist or not tracks:
+            reason = "歌单名为空" if not playlist else "歌单没有曲目"
+            logger.warning(f"{source}[{label}]{reason}，跳过")
+            stats["playlists"].append({
+                "server": server_name, "source": source, "name": label,
+                "status": "error", "message": reason})
+            return
+        try:
+            added, missing = self._push(server, playlist, tracks, users, index)
+        except Exception as error:  # noqa: BLE001
+            logger.error(f"{source}同步播放列表[{playlist}]失败：{error}")
+            stats["playlists"].append({
+                "server": server_name, "source": source, "name": playlist,
+                "total": len(tracks), "status": "error", "message": str(error)})
+            return
+        if index is None:
+            # 没走索引：每首歌一次检索（供数据页对比）
+            metrics["library_requests"] += len(tracks)
+        self._collect_missing(source, server_name, playlist, missing)
+        stats["playlists"].append({
+            "server": server_name, "source": source, "name": playlist,
+            "total": len(tracks), "added": added, "missing": len(missing),
+            "status": "stale" if snapshot.get("stale") else "ok",
+            "message": "歌单读取失败，本次沿用上次快照" if snapshot.get("stale") else ""})
+        # 更新歌单的同时把播放列表的总览（摘要）一并写回媒体服务器
+        self._update_playlist_summary(server, playlist, source,
+                                      len(tracks), added, len(missing))
+
+    def _update_playlist_summary(self, server: Any, playlist: str, source: str,
+                                 total: int, added: int, missing: int) -> None:
+        """把本轮同步结果写进媒体服务器里播放列表的总览（摘要）。
+
+        写失败只记日志：总览是附加信息，不影响歌单与清单本身的结果。
+        """
+        writer = getattr(server, "update_summary", None)
+        if not callable(writer):
+            return
+        summary = self._playlist_summary(source, playlist, total, added, missing)
+        try:
+            writer(playlist, summary)
+        except Exception as error:  # noqa: BLE001
+            logger.info(f"更新播放列表[{playlist}]总览失败：{error}")
+
+    def _playlist_summary(self, source: str, playlist: str, total: int,
+                          added: int, missing: int) -> str:
+        """播放列表总览文案：来源、同步时间与曲目统计。"""
+        head = f"由「歌单订阅」同步自 {source or '未知来源'} · {playlist}"
+        body = (f"同步时间 {self._now()}｜歌单 {total} 首｜本次新增 {added} 首"
+                + (f"｜库内缺失 {missing} 首（见插件数据页）" if missing else ""))
+        return f"{head}\n{body}"
 
     def _build_index(self, server: Any, server_name: str,
                      snapshots: Dict[str, Dict[str, Any]],

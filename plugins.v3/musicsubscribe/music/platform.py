@@ -1,14 +1,12 @@
-"""多平台适配层。
+"""多平台适配层（歌单获取）。
 
 把「网易云 / QQ 音乐 / Spotify / 酷狗 / 酷我 / 咪咕」等平台的**歌单获取**
-与**关键词搜索**收敛到一个统一的 :class:`MusicPlatform` 接口后面：
+收敛到一个统一的 :class:`MusicPlatform` 接口后面：
 
     fetch_playlist(identifier, name="") -> (播放列表名, [Track, ...])
-    search(keyword, limit=20)            -> [Track, ...]
-    download_descriptor(track)           -> {kind, ...}   # 解析这条曲目的下载方式
 
 新增平台只需要在这里注册一个适配器类（写进 :data:`PLATFORMS`），宿主编排与前端
-**都不用改动**——``__init__.py`` 已经按 ``platform:标识符:名称`` 的通用格式把配置
+**都不用改动**——``__init__.py`` 已经按 ``platform|标识符|名称`` 的通用格式把配置
 路由到对应适配器。
 """
 
@@ -18,7 +16,6 @@ import json
 import re
 import threading
 import time
-import uuid
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 from .rate import Throttle
@@ -59,7 +56,7 @@ class MusicPlatform:
         return ""
 
     # ------------------------------------------------------------------
-    # 核心能力（子类必须实现 fetch_playlist / search）
+    # 核心能力（子类必须实现 fetch_playlist）
     # ------------------------------------------------------------------
 
     def fetch_playlist(self, identifier: str, name: str = "") -> Tuple[str, List[Track]]:
@@ -68,35 +65,6 @@ class MusicPlatform:
         :return: ``(播放列表名, [Track, ...])``；失败时抛 :class:`PlatformError`。
         """
         raise NotImplementedError
-
-    def search(self, keyword: str, limit: int = 20) -> List[Track]:
-        """按关键词搜索曲目，返回 :class:`Track` 列表。"""
-        raise NotImplementedError
-
-    # ------------------------------------------------------------------
-    # 下载能力（默认不可用，子类按需覆盖）
-    # ------------------------------------------------------------------
-
-    def download_descriptor(self, track: Track) -> Dict[str, Any]:
-        """解析一条曲目的下载方式。
-
-        返回结构：
-
-        - ``{"kind": "none", "reason": "..."}`` —— 平台不支持直接下载（DRM 等）；
-        - ``{"kind": "direct", "url": "..."}`` —— 可直接拉取的音频地址（仍需宿主落盘）；
-        - ``{"kind": "torrent", "url": "magnet:..."}`` —— 磁力 / 种子，交给下载客户端。
-
-        默认实现返回 ``none``：多数平台的音频带 DRM 或未开放直链。**目前只有网易云**
-        （:class:`NeteaseAdapter`，经本地 ncm-api）覆盖了本方法、能拿到公开直链。
-
-        无论哪个平台，插件都**不解密音频、不绕过付费限制**：平台不给地址就是给不了，
-        把原因如实透传给用户。
-        """
-        return {
-            "kind": "none",
-            "reason": f"{self.label}未开放音频直链（或该内容受版权保护），插件不做解密与绕过；"
-                      "目前仅「网易云」（经 ncm-api）支持真实下载",
-        }
 
     # ------------------------------------------------------------------
     # 链接
@@ -171,15 +139,6 @@ def _parse_json(resp: Any, url: str) -> Dict[str, Any]:
         raise PlatformError(f"解析 {url} 返回内容失败：{error}") from error
 
 
-def _jsonp_to_json(text: str) -> Dict[str, Any]:
-    """把 ``callback({...})`` 形式的 JSONP 剥成 JSON（酷狗等接口用）。"""
-    text = (text or "").strip()
-    match = re.search(r"\(\s*(\{.*\})\s*\)\s*;?\s*$", text, re.S)
-    if match:
-        text = match.group(1)
-    return json.loads(text)
-
-
 # ======================================================================
 # 网易云（复用现有 NeteaseClient，经本地 ncm-api 转发）
 # ======================================================================
@@ -206,88 +165,12 @@ class NeteaseAdapter(MusicPlatform):
         tracks = self._client().playlist_tracks(identifier)
         return (name or f"网易云歌单{identifier}"), tracks
 
-    def search(self, keyword: str, limit: int = 20) -> List[Track]:
-        client = self._client()
-        result = client.request("/search", {"keywords": keyword, "limit": limit, "offset": 0})
-        client._check(result, "搜索")
-        songs = (result.get("result") or {}).get("songs") or []
-        out: List[Track] = []
-        for song in songs:
-            if not isinstance(song, dict):
-                continue
-            artists = [
-                change_str(a.get("name")) for a in (song.get("artists") or [])
-                if isinstance(a, dict)
-            ]
-            album = song.get("album") or {}
-            out.append(Track(
-                title=strip_brackets(song.get("name")),
-                artists=[a for a in artists if a],
-                album=strip_brackets(album.get("name")) if isinstance(album, dict) else "",
-                duration=to_seconds(song.get("duration")),
-                platform=NETEASE,
-                source_id=str(song.get("id") or ""),
-                album_id=str((album or {}).get("id") or ""),
-            ))
-        return out
-
-    def download_descriptor(self, track: Track) -> Dict[str, Any]:
-        """取网易云的音频直链（经本地 ncm-api，不解密、不绕过）。
-
-        只取平台**当前允许直接访问**的地址：
-
-        - 平台返回完整音频地址 → ``direct``，交给 :mod:`music.download` 落盘；
-        - 平台不给（付费 / 会员内容、当前账号无权该音质）→ ``none`` 并如实说明；
-        - 平台只给了试听片段（``freeTrialInfo``）→ ``none``，不拿片段冒充完整音频。
-
-        **不做任何付费限制绕过或 DRM 解密**——平台说不行就是不行。
-        """
-        sid = str(track.source_id or "").strip()
-        if not sid:
-            return {"kind": "none", "reason": "缺少歌曲 ID，无法取直链"}
-        fmt = (self._config.get("download_format") or "flac").strip().lower()
-        level = _NETEASE_LEVELS.get(fmt, "standard")
-        try:
-            result = self._client().request("/song/url", {"id": sid, "level": level})
-        except Exception as error:  # noqa: BLE001 - 统一转成给用户看的说明
-            return {"kind": "none", "reason": f"取直链失败：{error}"}
-        data = (result or {}).get("data") or []
-        item = data[0] if isinstance(data, list) and data else None
-        if not isinstance(item, dict):
-            return {"kind": "none", "reason": "ncm-api 未返回歌曲地址"}
-        url = str(item.get("url") or "").strip()
-        if not url:
-            return {
-                "kind": "none",
-                "reason": "平台未返回可播放地址（该曲多为付费 / 会员内容，"
-                          "或当前账号无权该音质），插件不会绕过付费限制",
-            }
-        if item.get("freeTrialInfo"):
-            return {
-                "kind": "none",
-                "reason": "平台只返回了试听片段（付费内容），插件不保存片段冒充完整音频",
-            }
-        return {"kind": "direct", "url": url, "bitrate": item.get("br") or 0}
-
-
-#: 下载格式 -> ncm-api ``/song/url`` 的音质档位
-#: （平台不给该档位就取不到地址，绝不降级去破解）
-_NETEASE_LEVELS = {
-    "flac": "lossless",
-    "mp3": "exhigh",
-    "m4a": "standard",
-    "wav": "hires",
-    "ogg": "standard",
-}
-
 
 # ======================================================================
 # QQ 音乐（复用现有 QQMusicClient，公开 musicu.fcg 接口）
 # ======================================================================
 
-_QQ_SEARCH_API = "https://u.y.qq.com/cgi-bin/musicu.fcg"
 _QQ_USER_AGENT = "QQMusic/73222 CFNetwork/1406.0.2 Darwin/22.4.0"
-_QQ_SEARCH_THROTTLE = Throttle(5.0)
 
 
 class QQAdapter(MusicPlatform):
@@ -306,43 +189,6 @@ class QQAdapter(MusicPlatform):
         from .qqmusic import QQMusicClient
         tracks = QQMusicClient().playlist_tracks(identifier)
         return (name or f"QQ音乐歌单{identifier}"), tracks
-
-    def search(self, keyword: str, limit: int = 20) -> List[Track]:
-        guid = str(uuid.uuid1())
-        payload = {
-            "music.search.SearchHome": {
-                "module": "music.search.SearchHome",
-                "method": "search_home",
-                "param": {"query": keyword, "search_type": 1,
-                          "num_per_page": limit, "page_num": 1},
-            },
-            "comm": {"g_tk": 0, "uin": "", "format": "json", "ct": 6, "cv": 80600,
-                     "platform": "wk_v17", "uid": "", "guid": guid},
-        }
-        _QQ_SEARCH_THROTTLE.wait()
-        helper = _HttpHelper()
-        result = helper.post_json(_QQ_SEARCH_API, payload, headers=self._headers())
-        node = (result.get("music.search.SearchHome") or {}).get("data") or {}
-        songs = (node.get("song") or {}).get("list") or []
-        out: List[Track] = []
-        for song in songs:
-            if not isinstance(song, dict):
-                continue
-            artists = [
-                change_str(s.get("singer") or s.get("name"))
-                for s in (song.get("singer") or [])
-                if isinstance(s, dict)
-            ]
-            out.append(Track(
-                title=strip_brackets(song.get("songname") or song.get("name")),
-                artists=[a for a in artists if a],
-                album=strip_brackets(song.get("albumname") or ""),
-                duration=to_seconds(song.get("interval")),
-                platform=QQ,
-                source_id=str(song.get("songmid") or song.get("songid") or ""),
-                album_id=str(song.get("albummid") or ""),
-            ))
-        return out
 
 
 # ======================================================================
@@ -440,22 +286,6 @@ class SpotifyAdapter(MusicPlatform):
                 out.append(track)
         return playlist_name, out
 
-    def search(self, keyword: str, limit: int = 20) -> List[Track]:
-        helper = _HttpHelper()
-        data = helper.get_json(
-            f"{_SPOTIFY_API}/search",
-            params={"q": keyword, "type": "track", "limit": limit,
-                    "market": "CN" if False else ""},
-            headers=self._headers(),
-        )
-        items = ((data.get("tracks") or {}).get("items") or [])
-        out: List[Track] = []
-        for item in items:
-            track = self._to_track(item)
-            if track:
-                out.append(track)
-        return out
-
 
 def _b64(text: str) -> str:
     import base64
@@ -515,30 +345,6 @@ class KugouAdapter(_CommunityAdapter):
             ))
         return playlist_name, out
 
-    def search(self, keyword: str, limit: int = 20) -> List[Track]:
-        http = self._http()
-        text = http.get_text(
-            "https://songsearch.kugou.com/song_search_v2",
-            params={"keyword": keyword, "page": 1, "pagesize": limit,
-                    "platform": "WebFilter", "format": "json"},
-        )
-        data = _jsonp_to_json(text) if "callback" in text else json.loads(text)
-        lists = (data.get("data") or {}).get("lists") or []
-        out: List[Track] = []
-        for song in lists:
-            if not isinstance(song, dict):
-                continue
-            out.append(Track(
-                title=strip_brackets(song.get("SongName") or song.get("songname")),
-                artists=[change_str(song.get("SingerName"))] if song.get("SingerName") else [],
-                album=strip_brackets(song.get("AlbumName") or ""),
-                duration=to_seconds(song.get("Duration") or song.get("duration")),
-                platform=KUGOU,
-                source_id=str(song.get("FileHash") or song.get("FileID") or ""),
-                album_id=str(song.get("AlbumID") or ""),
-            ))
-        return out
-
 
 class KuwoAdapter(_CommunityAdapter):
     name = KUWO
@@ -591,30 +397,6 @@ class KuwoAdapter(_CommunityAdapter):
             ))
         return playlist_name, out
 
-    def search(self, keyword: str, limit: int = 20) -> List[Track]:
-        http = self._http()
-        self._csrf(http)
-        data = http.get_json(
-            "https://www.kuwo.cn/api/www/search/searchMusicByKeyWord",
-            params={"key": keyword, "pn": 1, "rn": limit},
-            headers=self._headers(),
-        )
-        songs = ((data.get("data") or {}).get("list") or [])
-        out: List[Track] = []
-        for song in songs:
-            if not isinstance(song, dict):
-                continue
-            out.append(Track(
-                title=strip_brackets(song.get("name")),
-                artists=[change_str(song.get("artist"))] if song.get("artist") else [],
-                album=strip_brackets(song.get("album") or ""),
-                duration=to_seconds(song.get("duration") or song.get("songTimeMinutes")),
-                platform=KUWO,
-                source_id=str(song.get("rid") or song.get("id") or ""),
-                album_id=str(song.get("albumid") or ""),
-            ))
-        return out
-
 
 class MiguAdapter(_CommunityAdapter):
     name = MIGU
@@ -656,31 +438,6 @@ class MiguAdapter(_CommunityAdapter):
             ))
         return playlist_name, out
 
-    def search(self, keyword: str, limit: int = 20) -> List[Track]:
-        http = self._http()
-        data = http.get_json(
-            "https://m.music.migu.cn/migu/remoting/scr_search_tag",
-            params={"keyword": keyword, "type": 2, "rows": limit, "pgc": 1},
-            headers=self._headers(),
-        )
-        songs = data.get("musics") or data.get("data") or []
-        out: List[Track] = []
-        for song in songs:
-            if not isinstance(song, dict):
-                continue
-            singers = song.get("singerName") or ""
-            artists = [change_str(s) for s in str(singers).split("/") if s.strip()] if singers else []
-            out.append(Track(
-                title=strip_brackets(song.get("songName") or song.get("name")),
-                artists=artists,
-                album=strip_brackets(song.get("albumName") or song.get("album") or ""),
-                duration=to_seconds(song.get("duration") or song.get("length")),
-                platform=MIGU,
-                source_id=str(song.get("mgResourceId") or song.get("songId") or song.get("id") or ""),
-                album_id=str(song.get("albumId") or ""),
-            ))
-        return out
-
 
 # ======================================================================
 # 注册表
@@ -695,9 +452,6 @@ PLATFORMS: Dict[str, Type[MusicPlatform]] = {
     KUWO: KuwoAdapter,
     MIGU: MiguAdapter,
 }
-
-#: 默认参与搜索的平台（不支持关键词搜索的平台自动排除）
-DEFAULT_SEARCH_PLATFORMS = [NETEASE, QQ, SPOTIFY, KUGOU, KUWO, MIGU]
 
 
 def get_platform(name: str, config: Optional[Dict[str, Any]] = None) -> MusicPlatform:
@@ -722,15 +476,9 @@ def list_platforms(config: Optional[Dict[str, Any]] = None) -> List[Dict[str, An
     return out
 
 
-def available_platforms(config: Optional[Dict[str, Any]] = None) -> List[str]:
-    """当前配置下可用的平台标识列表。"""
-    return [p["name"] for p in list_platforms(config) if p["available"]]
-
-
 __all__ = [
     "MusicPlatform", "PlatformError", "PLATFORMS",
-    "get_platform", "list_platforms", "available_platforms",
-    "DEFAULT_SEARCH_PLATFORMS",
+    "get_platform", "list_platforms",
     "NeteaseAdapter", "QQAdapter", "SpotifyAdapter",
     "KugouAdapter", "KuwoAdapter", "MiguAdapter",
 ]

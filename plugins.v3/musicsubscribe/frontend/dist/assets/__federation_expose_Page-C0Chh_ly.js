@@ -107,12 +107,16 @@ const _hoisted_56 = {
 };
 const _hoisted_57 = { class: "ms-foot__count" };
 const _hoisted_58 = {
+  key: 0,
+  class: "ms-foot__count"
+};
+const _hoisted_59 = {
   key: 5,
   class: "ms-foot"
 };
-const _hoisted_59 = { class: "ms-foot__count" };
+const _hoisted_60 = { class: "ms-foot__count" };
 
-const {computed,onMounted,reactive,ref,watch} = await importShared('vue');
+const {computed,onMounted,onUnmounted,reactive,ref,watch} = await importShared('vue');
 
 
 const PLUGIN = 'plugin/MusicSubscribe';
@@ -157,6 +161,12 @@ const keyword = ref('');
 const sourceFilter = ref(null);
 const page = ref(1);
 const pageSize = ref(20);
+
+// 分批订阅：每批条数与执行进度（批间会刷新总览，进度即时可见）
+const batchSizes = [10, 20, 50, 100];
+const batchSize = ref(20);
+const batchProgress = ref(null);
+const batchAbort = ref(false);
 
 // seq -> 'song' | 'album'
 const picks = reactive({});
@@ -251,12 +261,32 @@ async function load() {
     const alive = new Set(items.value.map(i => Number(i.seq)));
     Object.keys(picks).forEach(seq => { if (!alive.has(Number(seq))) delete picks[seq]; });
     if (page.value > pageCount.value) page.value = pageCount.value;
+    // 同步进行中：按节奏轮询，让歌单总览随「更新歌单」实时刷新
+    if (running.value && !subscribing.value) startPolling();
+    else stopPolling();
   } catch (e) {
     error.value = '加载缺失清单失败：' + (e?.message || e);
     items.value = [];
+    stopPolling();
   } finally {
     loading.value = false;
     emit('action');
+  }
+}
+
+// 同步中轮询（约 5 秒一次）：一轮同步要按歌单逐个推进，轮询让总览与清单持续保鲜
+let pollTimer = null;
+function startPolling() {
+  if (pollTimer) return
+  pollTimer = setInterval(() => {
+    if (subscribing.value) return
+    load().catch(() => stopPolling());
+  }, 5000);
+}
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
   }
 }
 
@@ -317,6 +347,11 @@ function selectAll() {
   pendingRows.value.forEach(row => { picks[Number(row.seq)] = 'song'; });
 }
 
+// 选择当前页：只勾选当前这一页显示的行（歌单粒度按歌曲）
+function selectCurrentPage() {
+  pagedRows.value.forEach(row => { picks[Number(row.seq)] = 'song'; });
+}
+
 function invert() {
   pendingRows.value.forEach(row => {
     const seq = Number(row.seq);
@@ -340,38 +375,73 @@ function linkEntries(links) {
   ]
 }
 
+// 停止分批订阅：当前批执行完后中断，剩余勾选保留以便续订
+function stopBatch() {
+  batchAbort.value = true;
+}
+
 async function subscribePicked() {
   const payload = Object.keys(picks)
     .map(seq => ({ seq: Number(seq), target: picks[seq] }))
     .filter(i => i.target);
   if (!payload.length) return
+  // 按「每批 N 条」切批：批间刷新清单与总览，进度即时可见，可中途停止
+  const size = Math.max(1, Number(batchSize.value) || 20);
+  const batches = [];
+  for (let i = 0; i < payload.length; i += size) batches.push(payload.slice(i, i + size));
   subscribing.value = true;
+  batchAbort.value = false;
   error.value = '';
   result.value = '';
+  let okCount = 0;
+  let failCount = 0;
+  let queued = 0;
+  let doneBatches = 0;
+  const failedTitles = [];
   try {
-    const res = await call('post', `${PLUGIN}/pending/subscribe`, { items: payload });
-    if (res?.code === 0) {
-      const failed = (res.results || []).filter(r => !r.ok);
-      const detail = failed.map(f => `${f.title}（${f.message}）`).slice(0, 3).join('；');
-      resultLevel.value = failed.length ? 'warning' : 'success';
-      result.value = failed.length
-        ? `订阅完成：${payload.length - failed.length} 条订阅成功（可在「订阅历史」里查看），${failed.length} 条失败：${detail}`
-        : (res.message || '订阅完成');
-      // 订阅成功即入宿主搜索队列（可在配置里关闭）
-      if (res.search_queued > 0) {
-        result.value += `；${res.search_queued} 个订阅已送入宿主搜索队列`;
+    for (let bi = 0; bi < batches.length; bi++) {
+      doneBatches = bi + 1;
+      batchProgress.value = { done: doneBatches, total: batches.length, size: batches[bi].length };
+      try {
+        const res = await call('post', `${PLUGIN}/pending/subscribe`, { items: batches[bi] });
+        if (res?.code === 0) {
+          const failed = (res.results || []).filter(r => !r.ok);
+          okCount += batches[bi].length - failed.length;
+          failCount += failed.length;
+          failed.forEach(f => failedTitles.push(`${f.title}（${f.message}）`));
+          queued += Number(res.search_queued) || 0;
+        } else {
+          failCount += batches[bi].length;
+          failedTitles.push(`第 ${doneBatches} 批：${res?.message || '订阅失败'}`);
+        }
+      } catch (e) {
+        failCount += batches[bi].length;
+        failedTitles.push(`第 ${doneBatches} 批：${e?.message || e}`);
       }
-      clearPick();
-      await load();
-    } else {
-      resultLevel.value = 'error';
-      result.value = res?.message || '订阅失败';
+      // 批间刷新：订阅成功的条目移出清单，总览与勾选状态随之更新
+      try { await load(); } catch (_) { /* 刷新失败不影响后续批次 */ }
+      if (batchAbort.value) break
     }
+    const detail = failedTitles.slice(0, 3).join('；');
+    resultLevel.value = failCount ? 'warning' : 'success';
+    if (batchAbort.value) {
+      const sent = batches.slice(0, doneBatches).reduce((n, b) => n + b.length, 0);
+      const left = payload.length - sent;
+      result.value = `已停止（完成 ${doneBatches}/${batches.length} 批）：成功 ${okCount} 条，失败 ${failCount} 条，剩余 ${left} 条未订阅（勾选已保留，可再点「订阅」继续）`;
+    } else if (failCount) {
+      result.value = `订阅完成：${okCount} 条订阅成功（可在「订阅历史」里查看），${failCount} 条失败：${detail}`;
+    } else {
+      result.value = `订阅完成：${okCount} 条订阅成功（可在「订阅历史」里查看）`;
+    }
+    if (queued > 0) result.value += `；${queued} 个订阅已送入宿主搜索队列`;
+    if (!batchAbort.value) clearPick();
   } catch (e) {
     resultLevel.value = 'error';
     result.value = '订阅失败：' + (e?.message || e);
   } finally {
+    batchProgress.value = null;
     subscribing.value = false;
+    batchAbort.value = false;
   }
 }
 
@@ -420,6 +490,7 @@ watch([scope, keyword, sourceFilter, targetFilter, pageSize], () => { page.value
 watch(scope, load);
 
 onMounted(load);
+onUnmounted(stopPolling);
 
 return (_ctx, _cache) => {
   const _component_v_icon = _resolveComponent("v-icon");
@@ -444,14 +515,14 @@ return (_ctx, _cache) => {
         ]),
         _createElementVNode("div", null, [
           _createElementVNode("div", _hoisted_5, [
-            _cache[15] || (_cache[15] = _createElementVNode("span", null, "MoviePilot", -1)),
+            _cache[16] || (_cache[16] = _createElementVNode("span", null, "MoviePilot", -1)),
             _createVNode(_component_v_icon, {
               icon: "mdi-chevron-right",
               size: "13"
             }),
-            _cache[16] || (_cache[16] = _createElementVNode("span", null, "插件", -1))
+            _cache[17] || (_cache[17] = _createElementVNode("span", null, "插件", -1))
           ]),
-          _cache[17] || (_cache[17] = _createElementVNode("h1", { class: "ms-head__title" }, "库内缺失曲目", -1))
+          _cache[18] || (_cache[18] = _createElementVNode("h1", { class: "ms-head__title" }, "库内缺失曲目", -1))
         ])
       ]),
       _createElementVNode("div", _hoisted_6, [
@@ -462,7 +533,7 @@ return (_ctx, _cache) => {
               "prepend-icon": "mdi-cog-outline",
               onClick: _cache[0] || (_cache[0] = $event => (emit('switch')))
             }, {
-              default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
+              default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
                 _createTextVNode("同步配置", -1)
               ]))]),
               _: 1
@@ -515,21 +586,21 @@ return (_ctx, _cache) => {
         onClick: _cache[5] || (_cache[5] = $event => (switchView('history')))
       }, [
         _createElementVNode("span", _hoisted_12, _toDisplayString(historySummary.total), 1),
-        _cache[19] || (_cache[19] = _createElementVNode("span", { class: "ms-stat__label" }, "订阅历史", -1))
+        _cache[20] || (_cache[20] = _createElementVNode("span", { class: "ms-stat__label" }, "订阅历史", -1))
       ], 2),
       _createElementVNode("div", _hoisted_13, [
         _createElementVNode("span", _hoisted_14, _toDisplayString(syncMissing.value), 1),
-        _cache[20] || (_cache[20] = _createElementVNode("span", { class: "ms-stat__label" }, "上次同步缺失", -1))
+        _cache[21] || (_cache[21] = _createElementVNode("span", { class: "ms-stat__label" }, "上次同步缺失", -1))
       ]),
       (running.value)
-        ? (_openBlock(), _createElementBlock("div", _hoisted_15, [...(_cache[21] || (_cache[21] = [
+        ? (_openBlock(), _createElementBlock("div", _hoisted_15, [...(_cache[22] || (_cache[22] = [
             _createElementVNode("span", { class: "ms-stat__num" }, "进行中", -1),
             _createElementVNode("span", { class: "ms-stat__label" }, "歌单同步", -1)
           ]))]))
         : (stats.value.metrics)
           ? (_openBlock(), _createElementBlock("div", _hoisted_16, [
               _createElementVNode("span", _hoisted_17, _toDisplayString(stats.value.metrics.library_requests ?? 0), 1),
-              _cache[22] || (_cache[22] = _createElementVNode("span", { class: "ms-stat__label" }, "媒体库请求", -1))
+              _cache[23] || (_cache[23] = _createElementVNode("span", { class: "ms-stat__label" }, "媒体库请求", -1))
             ]))
           : _createCommentVNode("", true)
     ]),
@@ -589,9 +660,19 @@ return (_ctx, _cache) => {
             _createVNode(_component_v_btn, {
               size: "small",
               variant: "tonal",
+              onClick: selectCurrentPage
+            }, {
+              default: _withCtx(() => [...(_cache[24] || (_cache[24] = [
+                _createTextVNode("选择当前页", -1)
+              ]))]),
+              _: 1
+            }),
+            _createVNode(_component_v_btn, {
+              size: "small",
+              variant: "tonal",
               onClick: _cache[6] || (_cache[6] = $event => (selectAll()))
             }, {
-              default: _withCtx(() => [...(_cache[23] || (_cache[23] = [
+              default: _withCtx(() => [...(_cache[25] || (_cache[25] = [
                 _createTextVNode("全选", -1)
               ]))]),
               _: 1
@@ -602,7 +683,7 @@ return (_ctx, _cache) => {
               onClick: invert
             }, {
               default: _withCtx(() => [
-                _cache[24] || (_cache[24] = _createTextVNode(" 反选 ", -1)),
+                _cache[26] || (_cache[26] = _createTextVNode(" 反选 ", -1)),
                 _createVNode(_component_v_tooltip, {
                   activator: "parent",
                   location: "bottom",
@@ -617,7 +698,7 @@ return (_ctx, _cache) => {
               disabled: !pickedCount.value,
               onClick: clearPick
             }, {
-              default: _withCtx(() => [...(_cache[25] || (_cache[25] = [
+              default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
                 _createTextVNode("清空选择", -1)
               ]))]),
               _: 1
@@ -669,7 +750,7 @@ return (_ctx, _cache) => {
         : (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
             (view.value === 'pending' && pagedRows.value.length)
               ? (_openBlock(), _createElementBlock("table", _hoisted_23, [
-                  _cache[26] || (_cache[26] = _createElementVNode("thead", null, [
+                  _cache[28] || (_cache[28] = _createElementVNode("thead", null, [
                     _createElementVNode("tr", null, [
                       _createElementVNode("th", { class: "col-seq" }, "序号"),
                       _createElementVNode("th", { class: "col-pick" }, "选择歌曲"),
@@ -744,7 +825,7 @@ return (_ctx, _cache) => {
                 ]))
               : (view.value === 'history' && pagedRows.value.length)
                 ? (_openBlock(), _createElementBlock("table", _hoisted_39, [
-                    _cache[27] || (_cache[27] = _createElementVNode("thead", null, [
+                    _cache[29] || (_cache[29] = _createElementVNode("thead", null, [
                       _createElementVNode("tr", null, [
                         _createElementVNode("th", { class: "col-seq" }, "序号"),
                         _createElementVNode("th", null, "歌曲名称"),
@@ -807,7 +888,7 @@ return (_ctx, _cache) => {
                       type: "info",
                       variant: "tonal"
                     }, {
-                      default: _withCtx(() => [...(_cache[28] || (_cache[28] = [
+                      default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
                         _createTextVNode(" 没有匹配的记录，换个关键词试试。 ", -1)
                       ]))]),
                       _: 1
@@ -836,7 +917,7 @@ return (_ctx, _cache) => {
             disabled: page.value <= 1,
             onClick: _cache[11] || (_cache[11] = $event => (page.value = page.value - 1))
           }, {
-            default: _withCtx(() => [...(_cache[29] || (_cache[29] = [
+            default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
               _createTextVNode("上一页", -1)
             ]))]),
             _: 1
@@ -847,7 +928,7 @@ return (_ctx, _cache) => {
             disabled: page.value >= pageCount.value,
             onClick: _cache[12] || (_cache[12] = $event => (page.value = page.value + 1))
           }, {
-            default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
+            default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
               _createTextVNode("下一页", -1)
             ]))]),
             _: 1
@@ -857,6 +938,19 @@ return (_ctx, _cache) => {
     (view.value === 'pending')
       ? (_openBlock(), _createElementBlock("footer", _hoisted_56, [
           _createElementVNode("span", _hoisted_57, "已勾选 " + _toDisplayString(pickedCount.value) + " 条（歌曲 " + _toDisplayString(countByTarget.value.song) + " / 专辑 " + _toDisplayString(countByTarget.value.album) + "）", 1),
+          _createVNode(_component_v_select, {
+            modelValue: batchSize.value,
+            "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((batchSize).value = $event)),
+            items: batchSizes,
+            class: "ms-foot__batch",
+            density: "compact",
+            variant: "outlined",
+            "hide-details": "",
+            label: "每批"
+          }, null, 8, ["modelValue"]),
+          (batchProgress.value)
+            ? (_openBlock(), _createElementBlock("span", _hoisted_58, " 第 " + _toDisplayString(batchProgress.value.done) + " / " + _toDisplayString(batchProgress.value.total) + " 批（本批 " + _toDisplayString(batchProgress.value.size) + " 条） ", 1))
+            : _createCommentVNode("", true),
           _createVNode(_component_v_spacer),
           _createVNode(_component_v_menu, { location: "top" }, {
             activator: _withCtx(({ props: menuProps }) => [
@@ -864,7 +958,7 @@ return (_ctx, _cache) => {
                 variant: "text",
                 "prepend-icon": "mdi-broom"
               }, menuProps), {
-                default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
+                default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
                   _createTextVNode("清理", -1)
                 ]))]),
                 _: 1
@@ -875,11 +969,11 @@ return (_ctx, _cache) => {
                 default: _withCtx(() => [
                   _createVNode(_component_v_list_item, {
                     title: "清理订阅失败记录",
-                    onClick: _cache[13] || (_cache[13] = $event => (clearPending('failed')))
+                    onClick: _cache[14] || (_cache[14] = $event => (clearPending('failed')))
                   }),
                   _createVNode(_component_v_list_item, {
                     title: "清空整个清单",
-                    onClick: _cache[14] || (_cache[14] = $event => (clearPending('all')))
+                    onClick: _cache[15] || (_cache[15] = $event => (clearPending('all')))
                   })
                 ]),
                 _: 1
@@ -895,11 +989,25 @@ return (_ctx, _cache) => {
             loading: removing.value,
             onClick: removePicked
           }, {
-            default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
+            default: _withCtx(() => [...(_cache[34] || (_cache[34] = [
               _createTextVNode("移除", -1)
             ]))]),
             _: 1
           }, 8, ["disabled", "loading"]),
+          (subscribing.value)
+            ? (_openBlock(), _createBlock(_component_v_btn, {
+                key: 1,
+                variant: "tonal",
+                color: "error",
+                "prepend-icon": "mdi-stop-circle-outline",
+                onClick: stopBatch
+              }, {
+                default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
+                  _createTextVNode("停止", -1)
+                ]))]),
+                _: 1
+              }))
+            : _createCommentVNode("", true),
           _createVNode(_component_v_btn, {
             color: "primary",
             variant: "flat",
@@ -908,14 +1016,14 @@ return (_ctx, _cache) => {
             loading: subscribing.value,
             onClick: subscribePicked
           }, {
-            default: _withCtx(() => [...(_cache[33] || (_cache[33] = [
+            default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
               _createTextVNode("订阅", -1)
             ]))]),
             _: 1
           }, 8, ["disabled", "loading"])
         ]))
-      : (_openBlock(), _createElementBlock("footer", _hoisted_58, [
-          _createElementVNode("span", _hoisted_59, "共 " + _toDisplayString(historySummary.total) + " 条订阅历史（歌曲 " + _toDisplayString(historySummary.song) + " / 专辑 " + _toDisplayString(historySummary.album) + "），清理历史不会影响宿主的订阅列表", 1),
+      : (_openBlock(), _createElementBlock("footer", _hoisted_59, [
+          _createElementVNode("span", _hoisted_60, "共 " + _toDisplayString(historySummary.total) + " 条订阅历史（歌曲 " + _toDisplayString(historySummary.song) + " / 专辑 " + _toDisplayString(historySummary.album) + "），清理历史不会影响宿主的订阅列表", 1),
           _createVNode(_component_v_spacer),
           _createVNode(_component_v_btn, {
             variant: "tonal",
@@ -925,7 +1033,7 @@ return (_ctx, _cache) => {
             loading: clearingHistory.value,
             onClick: clearHistory
           }, {
-            default: _withCtx(() => [...(_cache[34] || (_cache[34] = [
+            default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
               _createTextVNode("清空历史", -1)
             ]))]),
             _: 1
@@ -936,6 +1044,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const PageComponent = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-4be47ba1"]]);
+const PageComponent = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-881f2d3b"]]);
 
 export { PageComponent as default };
